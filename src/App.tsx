@@ -37,6 +37,7 @@ import { requestGyroPermission } from './hooks/useGyroSteering.ts';
 import { gameMusic } from './game/audio.ts';
 import {
   MultiplayerClient,
+  isStaticHosting,
   submitLeaderboardRecord,
   type MultiplayerTransport,
 } from './services/multiplayer.ts';
@@ -539,11 +540,25 @@ export default function App() {
       },
     });
 
-    client.connect();
+    // On full-stack servers, connect WebSocket immediately for live rooms & OTA version sync.
+    // On static hosts (GitHub Pages), connect Direct P2P lazily when opening Multiplayer or an invite link
+    // so initial game launch never depends on external WebRTC signaling.
+    if (!isStaticHosting() || pendingInviteCode) {
+      client.connect();
+    } else {
+      setMpTransport('p2p');
+    }
     return () => {
       client.disconnect();
     };
   }, []);
+
+  // Connect Direct P2P automatically whenever the player opens the Multiplayer lobby on GitHub Pages
+  useEffect(() => {
+    if ((activeScreen === 'multiplayer' || pendingInviteCode) && mpClientRef.current && !mpConnected) {
+      mpClientRef.current.connect();
+    }
+  }, [activeScreen, pendingInviteCode, mpConnected]);
 
   // If opened via a shared ?room=XXXX invite link, open Multiplayer lobby & auto-join once connected!
   useEffect(() => {

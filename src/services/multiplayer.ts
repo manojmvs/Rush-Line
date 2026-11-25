@@ -1,4 +1,4 @@
-import { Peer, type DataConnection } from 'peerjs';
+import type { Peer as PeerInstance, DataConnection } from 'peerjs';
 import {
   TRACK_SPECS,
   type GameMode,
@@ -10,6 +10,39 @@ import {
   type TrackId,
   type VehicleConfig,
 } from '../types/game.ts';
+
+type PeerConstructor = typeof import('peerjs').Peer;
+let cachedPeerCtor: PeerConstructor | null = null;
+let peerLoadPromise: Promise<PeerConstructor> | null = null;
+
+async function loadPeerConstructor(): Promise<PeerConstructor> {
+  if (cachedPeerCtor) return cachedPeerCtor;
+  if (!peerLoadPromise) {
+    peerLoadPromise = import('peerjs')
+      .then((mod) => {
+        const defaultExport = (mod as unknown as { default?: unknown }).default;
+        const resolved =
+          typeof mod.Peer === 'function'
+            ? mod.Peer
+            : typeof defaultExport === 'function'
+              ? (defaultExport as PeerConstructor)
+              : defaultExport &&
+                  typeof (defaultExport as { Peer?: unknown }).Peer === 'function'
+                ? (defaultExport as { Peer: PeerConstructor }).Peer
+                : null;
+        if (!resolved) {
+          throw new Error('PeerJS module loaded without Peer constructor');
+        }
+        cachedPeerCtor = resolved;
+        return resolved;
+      })
+      .catch((err) => {
+        peerLoadPromise = null;
+        throw err;
+      });
+  }
+  return peerLoadPromise;
+}
 
 export type MultiplayerTransport = 'ws' | 'p2p';
 
@@ -130,9 +163,10 @@ export class MultiplayerClient {
   private callbacks: MultiplayerCallbacks = {};
   public playerId = '';
 
-  // P2P WebRTC state (PeerJS)
-  private clientPeer: Peer | null = null;
-  private hostPeer: Peer | null = null;
+  // P2P WebRTC state (PeerJS, dynamically loaded on demand)
+  private clientPeer: PeerInstance | null = null;
+  private hostPeer: PeerInstance | null = null;
+  private p2pInitPromise: Promise<PeerInstance | null> | null = null;
   private hostRoom: RoomState | null = null;
   private hostConns = new Map<string, DataConnection>();
   private connToPlayerId = new Map<DataConnection, string>();
@@ -154,7 +188,7 @@ export class MultiplayerClient {
     if (this.transport === 'p2p' || isStaticHosting()) {
       this.transport = 'p2p';
       this.callbacks.onTransportChange?.('p2p');
-      this.initP2PClient();
+      void this.initP2PClient();
       return;
     }
     this.callbacks.onTransportChange?.('ws');
@@ -216,11 +250,13 @@ export class MultiplayerClient {
     } catch {
       this.transport = 'p2p';
       this.callbacks.onTransportChange?.('p2p');
-      this.initP2PClient();
+      void this.initP2PClient();
     }
   }
 
-  private initP2PClient(): void {
+  private async initP2PClient(): Promise<PeerInstance | null> {
+    if (this.closedManually) return null;
+
     if (this.clientPeer && !this.clientPeer.destroyed) {
       if (this.clientPeer.open) {
         this.callbacks.onConnectionChange?.(true);
@@ -231,67 +267,83 @@ export class MultiplayerClient {
           // recreate below if needed
         }
       }
-      return;
+      return this.clientPeer;
     }
 
-    if (!this.playerId) {
-      this.playerId = generatePeerPlayerId();
+    if (this.p2pInitPromise) {
+      return this.p2pInitPromise;
     }
-    this.callbacks.onSessionInit?.(this.playerId);
 
-    try {
-      const peer = new Peer(this.playerId, {
-        debug: 0,
-        config: { iceServers: ICE_SERVERS },
-      });
-      this.clientPeer = peer;
+    this.p2pInitPromise = (async () => {
+      if (!this.playerId) {
+        this.playerId = generatePeerPlayerId();
+      }
+      this.callbacks.onSessionInit?.(this.playerId);
 
-      peer.on('open', (id) => {
-        if (this.closedManually) return;
-        this.playerId = id;
-        this.callbacks.onSessionInit?.(id);
-        this.callbacks.onConnectionChange?.(true);
-      });
+      try {
+        const PeerCtor = await loadPeerConstructor();
+        if (this.closedManually) return null;
 
-      peer.on('disconnected', () => {
-        if (this.closedManually) return;
-        this.callbacks.onConnectionChange?.(false);
-        this.reconnectTimer = setTimeout(() => {
+        const peer = new PeerCtor(this.playerId, {
+          debug: 0,
+          config: { iceServers: ICE_SERVERS },
+        });
+        this.clientPeer = peer;
+
+        peer.on('open', (id) => {
           if (this.closedManually) return;
-          if (this.clientPeer && !this.clientPeer.destroyed) {
-            try {
-              this.clientPeer.reconnect();
-            } catch {
-              this.clientPeer.destroy();
-              this.clientPeer = null;
-              this.initP2PClient();
-            }
-          }
-        }, 2000);
-      });
+          this.playerId = id;
+          this.callbacks.onSessionInit?.(id);
+          this.callbacks.onConnectionChange?.(true);
+        });
 
-      peer.on('error', (err) => {
-        if (this.closedManually) return;
-        const errType = String((err as { type?: string })?.type || '');
-        if (errType === 'peer-unavailable') {
-          this.clearGuestJoinTimer();
-          this.cleanupGuestConn(false);
-          this.callbacks.onError?.('Room not found or host is offline. Double-check the 4-character code.');
-        } else if (errType === 'network' || errType === 'server-error' || errType === 'socket-error') {
+        peer.on('disconnected', () => {
+          if (this.closedManually) return;
           this.callbacks.onConnectionChange?.(false);
           this.reconnectTimer = setTimeout(() => {
-            if (!this.closedManually) {
-              this.clientPeer?.destroy();
-              this.clientPeer = null;
-              this.initP2PClient();
+            if (this.closedManually) return;
+            if (this.clientPeer && !this.clientPeer.destroyed) {
+              try {
+                this.clientPeer.reconnect();
+              } catch {
+                this.clientPeer.destroy();
+                this.clientPeer = null;
+                void this.initP2PClient();
+              }
             }
-          }, 3000);
-        }
-      });
-    } catch {
-      this.callbacks.onConnectionChange?.(false);
-      this.callbacks.onError?.('Unable to initialize WebRTC P2P multiplayer in this browser.');
-    }
+          }, 2000);
+        });
+
+        peer.on('error', (err) => {
+          if (this.closedManually) return;
+          const errType = String((err as { type?: string })?.type || '');
+          if (errType === 'peer-unavailable') {
+            this.clearGuestJoinTimer();
+            this.cleanupGuestConn(false);
+            this.callbacks.onError?.('Room not found or host is offline. Double-check the 4-character code.');
+          } else if (errType === 'network' || errType === 'server-error' || errType === 'socket-error') {
+            this.callbacks.onConnectionChange?.(false);
+            this.reconnectTimer = setTimeout(() => {
+              if (!this.closedManually) {
+                this.clientPeer?.destroy();
+                this.clientPeer = null;
+                void this.initP2PClient();
+              }
+            }, 3000);
+          }
+        });
+
+        return peer;
+      } catch {
+        this.callbacks.onConnectionChange?.(false);
+        this.callbacks.onError?.('Unable to initialize WebRTC P2P multiplayer in this browser.');
+        return null;
+      } finally {
+        this.p2pInitPromise = null;
+      }
+    })();
+
+    return this.p2pInitPromise;
   }
 
   private handleServerMessage(msg: Record<string, unknown>): void {
@@ -402,26 +454,41 @@ export class MultiplayerClient {
     }
   }
 
-  private hostP2PRoom(
+  private async hostP2PRoom(
     name: string,
     platform: PlatformType,
     trackId: TrackId,
     vehicle: VehicleConfig,
     attempt = 0
-  ): void {
+  ): Promise<void> {
     this.teardownP2PRoom(false);
     if (!this.playerId) {
       this.playerId = generatePeerPlayerId();
       this.callbacks.onSessionInit?.(this.playerId);
     }
 
+    let PeerCtor: PeerConstructor;
+    try {
+      PeerCtor = await loadPeerConstructor();
+    } catch {
+      this.callbacks.onError?.('Unable to load WebRTC multiplayer engine.');
+      return;
+    }
+    if (this.closedManually) return;
+
     const code = generateRoomCode();
     const roomPeerId = `${P2P_ROOM_PREFIX}${code}`;
 
-    const hostPeer = new Peer(roomPeerId, {
-      debug: 0,
-      config: { iceServers: ICE_SERVERS },
-    });
+    let hostPeer: PeerInstance;
+    try {
+      hostPeer = new PeerCtor(roomPeerId, {
+        debug: 0,
+        config: { iceServers: ICE_SERVERS },
+      });
+    } catch {
+      this.callbacks.onError?.('Unable to create WebRTC room in this browser.');
+      return;
+    }
     this.hostPeer = hostPeer;
 
     hostPeer.on('open', () => {
@@ -601,7 +668,7 @@ export class MultiplayerClient {
   // =========================================================================
   public createRoom(name: string, platform: PlatformType, trackId: TrackId, vehicle: VehicleConfig): void {
     if (this.transport === 'p2p') {
-      this.hostP2PRoom(name, platform, trackId, vehicle);
+      void this.hostP2PRoom(name, platform, trackId, vehicle);
       return;
     }
     this.sendWs({ type: 'room:create', name, platform, trackId, vehicle });
@@ -609,7 +676,7 @@ export class MultiplayerClient {
 
   public quickMatch(name: string, platform: PlatformType, trackId: TrackId, vehicle: VehicleConfig): void {
     if (this.transport === 'p2p') {
-      this.hostP2PRoom(name, platform, trackId, vehicle);
+      void this.hostP2PRoom(name, platform, trackId, vehicle);
       return;
     }
     this.sendWs({ type: 'room:quickmatch', name, platform, trackId, vehicle });
@@ -624,72 +691,74 @@ export class MultiplayerClient {
 
     if (this.transport === 'p2p') {
       this.teardownP2PRoom(false);
-      if (!this.clientPeer || this.clientPeer.destroyed) {
-        this.initP2PClient();
-      }
-      const peer = this.clientPeer;
-      if (!peer) {
-        this.callbacks.onError?.('Connecting to P2P network... try again in a second.');
-        return;
-      }
+      void (async () => {
+        const peer =
+          this.clientPeer && !this.clientPeer.destroyed
+            ? this.clientPeer
+            : await this.initP2PClient();
+        if (!peer || this.closedManually) {
+          this.callbacks.onError?.('Connecting to P2P network... try again in a second.');
+          return;
+        }
 
-      const startConnect = () => {
-        const targetId = `${P2P_ROOM_PREFIX}${cleanCode}`;
-        const conn = peer.connect(targetId, { reliable: true });
-        this.guestConn = conn;
-        this.guestLeaving = false;
+        const startConnect = () => {
+          const targetId = `${P2P_ROOM_PREFIX}${cleanCode}`;
+          const conn = peer.connect(targetId, { reliable: true });
+          this.guestConn = conn;
+          this.guestLeaving = false;
 
-        this.clearGuestJoinTimer();
-        this.guestJoinTimer = setTimeout(() => {
-          if (this.guestConn === conn && !conn.open) {
-            this.cleanupGuestConn(false);
-            this.callbacks.onError?.(
-              `Room ${cleanCode} not found or unreachable. Ask the host to keep their lobby open.`
-            );
-          }
-        }, 9000);
-
-        conn.on('open', () => {
           this.clearGuestJoinTimer();
-          conn.send({
-            type: 'p2p:join',
-            playerId: this.playerId,
-            name: name.trim().slice(0, 20) || 'Racer',
-            platform,
-            vehicle: { ...vehicle },
-          });
-        });
-
-        conn.on('data', (raw) => {
-          if (!raw || typeof raw !== 'object') return;
-          this.handleServerMessage(raw as Record<string, unknown>);
-        });
-
-        conn.on('close', () => {
-          this.clearGuestJoinTimer();
-          if (this.guestConn === conn) {
-            this.guestConn = null;
-            if (!this.guestLeaving) {
-              this.callbacks.onRoomState?.(null);
-              this.callbacks.onError?.('Disconnected from room host.');
+          this.guestJoinTimer = setTimeout(() => {
+            if (this.guestConn === conn && !conn.open) {
+              this.cleanupGuestConn(false);
+              this.callbacks.onError?.(
+                `Room ${cleanCode} not found or unreachable. Ask the host to keep their lobby open.`
+              );
             }
-          }
-        });
+          }, 9000);
 
-        conn.on('error', () => {
-          this.clearGuestJoinTimer();
-          if (this.guestConn === conn) {
-            this.guestConn = null;
-            this.callbacks.onError?.(`Could not join room ${cleanCode}.`);
-          }
-        });
-      };
+          conn.on('open', () => {
+            this.clearGuestJoinTimer();
+            conn.send({
+              type: 'p2p:join',
+              playerId: this.playerId,
+              name: name.trim().slice(0, 20) || 'Racer',
+              platform,
+              vehicle: { ...vehicle },
+            });
+          });
 
-      if (peer.open) {
-        startConnect();
-      } else {
-        peer.once('open', startConnect);
-      }
+          conn.on('data', (raw) => {
+            if (!raw || typeof raw !== 'object') return;
+            this.handleServerMessage(raw as Record<string, unknown>);
+          });
+
+          conn.on('close', () => {
+            this.clearGuestJoinTimer();
+            if (this.guestConn === conn) {
+              this.guestConn = null;
+              if (!this.guestLeaving) {
+                this.callbacks.onRoomState?.(null);
+                this.callbacks.onError?.('Disconnected from room host.');
+              }
+            }
+          });
+
+          conn.on('error', () => {
+            this.clearGuestJoinTimer();
+            if (this.guestConn === conn) {
+              this.guestConn = null;
+              this.callbacks.onError?.(`Could not join room ${cleanCode}.`);
+            }
+          });
+        };
+
+        if (peer.open) {
+          startConnect();
+        } else {
+          peer.once('open', startConnect);
+        }
+      })();
       return;
     }
 

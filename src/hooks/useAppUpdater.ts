@@ -39,7 +39,13 @@ async function clearStaleCaches(): Promise<void> {
   if (typeof window === 'undefined' || !('caches' in window)) return;
   try {
     const keys = await window.caches.keys();
-    await Promise.all(keys.map((key) => window.caches.delete(key)));
+    // Never delete active workbox-precache-* caches; Workbox's cleanupOutdatedCaches handles
+    // precache rotation safely, whereas wiping it breaks NavigationRoute(index.html) on reload.
+    await Promise.all(
+      keys
+        .filter((key) => !key.startsWith('workbox-precache'))
+        .map((key) => window.caches.delete(key))
+    );
   } catch {
     // ignore
   }
