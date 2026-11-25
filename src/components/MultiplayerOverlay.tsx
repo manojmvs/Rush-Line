@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Copy, Check, RefreshCw, Users, Play, LogOut, X } from 'lucide-react';
+import { Copy, Check, Link2, RefreshCw, Users, Play, LogOut, X } from 'lucide-react';
 import {
   CHASSIS_SPECS,
   TRACK_SPECS,
@@ -7,12 +7,18 @@ import {
   type RoomState,
   type TrackId,
 } from '../types/game.ts';
-import { fetchPublicRooms, type PublicRoomSummary } from '../services/multiplayer.ts';
+import {
+  fetchPublicRooms,
+  type MultiplayerTransport,
+  type PublicRoomSummary,
+} from '../services/multiplayer.ts';
 import { CheckeredAccent } from './GameArtWidgets.tsx';
 
 interface MultiplayerOverlayProps {
   connected: boolean;
+  transport: MultiplayerTransport;
   playerId: string;
+  initialJoinCode?: string;
   driverName: string;
   platform: PlatformType;
   selectedTrack: TrackId;
@@ -31,7 +37,9 @@ interface MultiplayerOverlayProps {
 
 export function MultiplayerOverlay({
   connected,
+  transport,
   playerId,
+  initialJoinCode = '',
   driverName,
   platform,
   selectedTrack,
@@ -47,12 +55,24 @@ export function MultiplayerOverlay({
   onStartRace,
   onClose,
 }: MultiplayerOverlayProps) {
-  const [joinCode, setJoinCode] = useState('');
+  const [joinCode, setJoinCode] = useState(initialJoinCode);
   const [publicRooms, setPublicRooms] = useState<PublicRoomSummary[]>([]);
   const [loadingRooms, setLoadingRooms] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
+
+  useEffect(() => {
+    if (initialJoinCode) {
+      setJoinCode(initialJoinCode);
+    }
+  }, [initialJoinCode]);
 
   const loadRooms = async () => {
+    if (transport === 'p2p') {
+      setPublicRooms([]);
+      setLoadingRooms(false);
+      return;
+    }
     setLoadingRooms(true);
     const list = await fetchPublicRooms();
     setPublicRooms(list);
@@ -63,7 +83,7 @@ export function MultiplayerOverlay({
     if (!room) {
       void loadRooms();
     }
-  }, [room]);
+  }, [room, transport]);
 
   const me = room?.players.find((p) => p.id === playerId);
   const isHost = me?.isHost ?? false;
@@ -73,6 +93,15 @@ export function MultiplayerOverlay({
     navigator.clipboard?.writeText(room.code);
     setCopied(true);
     setTimeout(() => setCopied(false), 1800);
+  };
+
+  const copyInviteLink = () => {
+    if (!room || typeof window === 'undefined') return;
+    const inviteUrl = new URL('./', window.location.href);
+    inviteUrl.searchParams.set('room', room.code);
+    navigator.clipboard?.writeText(inviteUrl.toString());
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2000);
   };
 
   return (
@@ -92,7 +121,11 @@ export function MultiplayerOverlay({
             </div>
             <div className="text-[11px] font-display italic font-bold text-slate-300 mt-0.5 flex items-center gap-2 truncate">
               <span className={connected ? 'text-[#FFD014]' : 'text-slate-400'}>
-                {connected ? 'Lobby Connected' : 'Connecting...'}
+                {connected
+                  ? transport === 'p2p'
+                    ? 'Lobby Connected (Direct P2P)'
+                    : 'Lobby Connected'
+                  : 'Connecting...'}
               </span>
               <span aria-hidden="true">·</span>
               <span>{platform}</span>
@@ -198,8 +231,10 @@ export function MultiplayerOverlay({
                 </div>
 
                 {publicRooms.length === 0 ? (
-                  <div className="py-5 text-center text-xs font-display italic font-bold text-slate-400 border border-dashed border-white/15 rounded bg-[#0E192D]">
-                    No open rooms waiting right now. Start a Quick Match or Create Room to host a cross-platform race.
+                  <div className="py-5 px-4 text-center text-xs font-display italic font-bold text-slate-400 border border-dashed border-white/15 rounded bg-[#0E192D]">
+                    {transport === 'p2p'
+                      ? 'Direct P2P Cross-Play is live! Click CREATE ROOM and share the 4-character Room Code or Invite Link with friends on any phone or PC to race together.'
+                      : 'No open rooms waiting right now. Start a Quick Match or Create Room to host a cross-platform race.'}
                   </div>
                 ) : (
                   <div className="divide-y divide-white/10 border border-white/15 rounded overflow-hidden">
@@ -248,6 +283,16 @@ export function MultiplayerOverlay({
                       <span className="skew-x-10 flex items-center gap-1.5">
                         {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5 text-[#FFD014]" />}
                         <span>{copied ? 'COPIED' : 'COPY CODE'}</span>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={copyInviteLink}
+                      className="px-3 py-1.5 -skew-x-10 bg-[#14223A] hover:bg-[#1E3254] border border-[#FFD014]/45 text-xs font-display italic font-bold text-[#FFD014] flex items-center gap-1.5 transition-colors"
+                    >
+                      <span className="skew-x-10 flex items-center gap-1.5">
+                        {copiedLink ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Link2 className="w-3.5 h-3.5" />}
+                        <span>{copiedLink ? 'LINK COPIED' : 'INVITE LINK'}</span>
                       </span>
                     </button>
                   </div>

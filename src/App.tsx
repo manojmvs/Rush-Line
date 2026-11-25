@@ -35,7 +35,11 @@ import { usePWAInstall } from './hooks/usePWAInstall.ts';
 import { useAppUpdater } from './hooks/useAppUpdater.ts';
 import { requestGyroPermission } from './hooks/useGyroSteering.ts';
 import { gameMusic } from './game/audio.ts';
-import { MultiplayerClient, submitLeaderboardRecord } from './services/multiplayer.ts';
+import {
+  MultiplayerClient,
+  submitLeaderboardRecord,
+  type MultiplayerTransport,
+} from './services/multiplayer.ts';
 import {
   CHASSIS_SPECS,
   DEFAULT_VEHICLE_CONFIG,
@@ -261,13 +265,20 @@ export default function App() {
   const [isNewBest, setIsNewBest] = useState(false);
   const [showPostRaceLeaderboard, setShowPostRaceLeaderboard] = useState(false);
 
-  // Multiplayer WebSocket state & Live OTA App Version sync
+  // Multiplayer WebSocket / WebRTC P2P state & Live OTA App Version sync
   const mpClientRef = useRef<MultiplayerClient | null>(null);
   const [mpConnected, setMpConnected] = useState(false);
+  const [mpTransport, setMpTransport] = useState<MultiplayerTransport>('ws');
   const [playerId, setPlayerId] = useState('');
   const [room, setRoom] = useState<RoomState | null>(null);
   const [mpError, setMpError] = useState<string | null>(null);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
+  const [pendingInviteCode, setPendingInviteCode] = useState<string>(() => {
+    if (typeof window === 'undefined') return '';
+    const code = new URLSearchParams(window.location.search).get('room') || '';
+    return code.trim().toUpperCase().slice(0, 4);
+  });
+  const inviteAutoJoinedRef = useRef(false);
 
   const { updateStatus, checkForUpdate, applyUpdate } = useAppUpdater({
     deferReload: inRace && !telemetry.finished,
@@ -485,6 +496,7 @@ export default function App() {
 
     client.setCallbacks({
       onConnectionChange: (conn) => setMpConnected(conn),
+      onTransportChange: (t) => setMpTransport(t),
       onSessionInit: (id) => setPlayerId(id),
       onAppVersion: (ver) => setServerVersion(ver),
       onRoomState: (nextRoom) => {
@@ -532,6 +544,24 @@ export default function App() {
       client.disconnect();
     };
   }, []);
+
+  // If opened via a shared ?room=XXXX invite link, open Multiplayer lobby & auto-join once connected!
+  useEffect(() => {
+    if (!pendingInviteCode || inviteAutoJoinedRef.current) return;
+    setActiveScreen('multiplayer');
+    if (mpConnected && mpClientRef.current) {
+      inviteAutoJoinedRef.current = true;
+      mpClientRef.current.joinRoom(pendingInviteCode, driverName, platform, vehicle);
+      try {
+        const cleanUrl = new URL(window.location.href);
+        cleanUrl.searchParams.delete('room');
+        window.history.replaceState({}, '', cleanUrl.toString());
+      } catch {
+        // ignore history errors
+      }
+      setPendingInviteCode('');
+    }
+  }, [pendingInviteCode, mpConnected, driverName, platform, vehicle]);
 
   // Keyboard shortcuts during race
   useEffect(() => {
@@ -1081,7 +1111,9 @@ export default function App() {
           {activeScreen === 'multiplayer' && (
             <MultiplayerOverlay
               connected={mpConnected}
+              transport={mpTransport}
               playerId={playerId}
+              initialJoinCode={pendingInviteCode}
               driverName={driverName}
               platform={platform}
               selectedTrack={selectedTrack}
