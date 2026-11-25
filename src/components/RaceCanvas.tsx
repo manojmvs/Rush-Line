@@ -563,6 +563,7 @@ export function RaceCanvas({
     let lastBeepInt = 4;
     let raceElapsedMs = 0;
     let raceEnded = false;
+    let leaderFinished = false;
     let lockedFinishTimeMs = 0;
     let lockedPlayerLap = 1;
     let lockedStandings: RaceTelemetry['standings'] | null = null;
@@ -1096,18 +1097,38 @@ export function RaceCanvas({
           }
 
           for (const ai of aiRivals) {
-            const aiIn: CarInput =
-              raceEnded || ai.car.finished
-                ? { throttle: 0, brake: 0.75, touchBrake: true, steer: 0, handbrake: Math.abs(ai.car.speed) < 4, nitro: false }
-                : computeAiInput(
-                    ai.car,
-                    builtTrack.samples,
-                    ai.skill,
-                    ai.preferredLane,
-                    builtTrack.diversions,
-                    playerCar.totalProgress,
-                    trackId
-                  );
+            let aiIn: CarInput;
+            if (raceEnded) {
+              aiIn = { throttle: 0, brake: 0.75, touchBrake: true, steer: 0, handbrake: Math.abs(ai.car.speed) < 4, nitro: false };
+            } else if (ai.car.finished) {
+              // Keep finished AI cruising gently past the finish line so they never park & block a 2nd/3rd player!
+              const cruiseIn = computeAiInput(
+                ai.car,
+                builtTrack.samples,
+                ai.skill,
+                ai.preferredLane,
+                builtTrack.diversions,
+                playerCar.totalProgress,
+                trackId
+              );
+              aiIn = {
+                ...cruiseIn,
+                throttle: ai.car.speed < 22 ? 0.32 : 0,
+                brake: ai.car.speed > 26 ? 0.25 : 0,
+                nitro: false,
+                handbrake: false,
+              };
+            } else {
+              aiIn = computeAiInput(
+                ai.car,
+                builtTrack.samples,
+                ai.skill,
+                ai.preferredLane,
+                builtTrack.diversions,
+                playerCar.totalProgress,
+                trackId
+              );
+            }
             stepCarPhysics(
               ai.car,
               aiIn,
@@ -1139,8 +1160,10 @@ export function RaceCanvas({
             }
           }
 
-          // Lock final standings immediately the instant ANY racer completes all laps!
-          // Never mark playerCar.finished = true if an AI/peer won, so standings reflect true position!
+          // Podium finish & elimination rule:
+          // - If player crosses the finish line -> end race & lock standings!
+          // - If a rival finishes first while player is in 2nd or 3rd -> let player keep driving to reach the finish line!
+          // - If a rival has finished and player is in 4th or worse (> 3rd) -> immediately end race & show Lose screen!
           if (!raceEnded && allowMovement) {
             const anyAiFinished = mode !== 'time-trial' && aiRivals.some((a) => a.car.finished);
             let anyPeerFinished = false;
@@ -1152,11 +1175,24 @@ export function RaceCanvas({
                 }
               }
             }
-            if (playerCar.finished || anyAiFinished || anyPeerFinished) {
+            if (anyAiFinished || anyPeerFinished) {
+              leaderFinished = true;
+            }
+
+            if (playerCar.finished) {
               raceEnded = true;
               lockedFinishTimeMs = Math.round(raceElapsedMs);
               lockedPlayerLap = playerCar.lap;
               lockedStandings = buildStandings();
+            } else if (leaderFinished && mode !== 'time-trial') {
+              const liveStandings = buildStandings();
+              const playerPos = liveStandings.find((s) => s.isPlayer)?.position ?? 1;
+              if (playerPos > 3) {
+                raceEnded = true;
+                lockedFinishTimeMs = Math.round(raceElapsedMs);
+                lockedPlayerLap = playerCar.lap;
+                lockedStandings = liveStandings;
+              }
             }
           }
         }
@@ -1622,6 +1658,7 @@ export function RaceCanvas({
             wrongWay: playerCar.wrongWay,
             countdown: countdownSec > 0 ? Math.ceil(countdownSec) : -1,
             finished: raceEnded,
+            leaderFinished: leaderFinished && !raceEnded,
             cameraMode: cameraModeRef.current,
             minimapCars,
             standings,

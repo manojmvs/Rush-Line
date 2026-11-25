@@ -171,6 +171,38 @@ export function RaceHud({
   const joyPointerIdRef = useRef<number | null>(null);
   const [joyActive, setJoyActive] = useState(false);
 
+  // Track lap start transitions to show a crisp lap announcement right as each lap begins
+  const prevLapRef = useRef<number>(0);
+  const prevCountdownRef = useRef<number>(telemetry.countdown);
+  const [lapBanner, setLapBanner] = useState<{ lap: number; isFinal: boolean; isStart: boolean } | null>(null);
+
+  useEffect(() => {
+    if (telemetry.finished || showObjective) {
+      setLapBanner(null);
+      prevLapRef.current = 0;
+      prevCountdownRef.current = telemetry.countdown;
+      return;
+    }
+
+    const total = Math.max(1, telemetry.totalLaps || 1);
+    const justStartedRace = prevCountdownRef.current > 0 && telemetry.countdown <= 0;
+    prevCountdownRef.current = telemetry.countdown;
+
+    if (justStartedRace) {
+      prevLapRef.current = telemetry.lap;
+      setLapBanner({ lap: telemetry.lap, isFinal: total === 1, isStart: true });
+      const t = window.setTimeout(() => setLapBanner(null), 2100);
+      return () => window.clearTimeout(t);
+    }
+
+    if (telemetry.countdown <= 0 && telemetry.lap > 1 && telemetry.lap !== prevLapRef.current) {
+      prevLapRef.current = telemetry.lap;
+      setLapBanner({ lap: telemetry.lap, isFinal: telemetry.lap >= total, isStart: false });
+      const t = window.setTimeout(() => setLapBanner(null), 2400);
+      return () => window.clearTimeout(t);
+    }
+  }, [telemetry.lap, telemetry.totalLaps, telemetry.countdown, telemetry.finished, showObjective]);
+
   const {
     visualSteer: gyroVisualSteer,
     sensorActive: gyroSensorActive,
@@ -468,13 +500,15 @@ export function RaceHud({
   const arcTotalLen = 198;
   const activeArcLen = Math.max(6, Math.round(rpmRatio * arcTotalLen));
 
-  // Win / Loss rule: 1st or 2nd place (or Time Trial completion) = WIN / LEVEL COMPLETE; 3rd+ = LOSER SCREEN
-  const isWinner = mode === 'time-trial' || telemetry.position <= 2;
+  // Win / Loss rule: 1st, 2nd, or 3rd place (or Time Trial completion) = WIN / LEVEL COMPLETE; 4th+ = LOSE SCREEN
+  const isWinner = mode === 'time-trial' || telemetry.position <= 3;
   const earnedStars =
     mode === 'time-trial' || telemetry.position === 1
       ? 3
       : telemetry.position === 2
       ? 2
+      : telemetry.position === 3
+      ? 1
       : 0;
   const winnerStanding = telemetry.standings[0];
   const formatOrdinal = (pos: number): string => {
@@ -504,17 +538,28 @@ export function RaceHud({
   const lapLabel = totalLaps === 1 ? 'Lap' : 'Laps';
   const rivalCount = Math.max(1, (telemetry.totalRacers || 6) - 1);
 
+  // Approaching start/finish line right before continuing onto the next lap
+  const approachingNextLap =
+    telemetry.countdown <= 0 &&
+    !telemetry.finished &&
+    !paused &&
+    !showObjective &&
+    telemetry.lap < totalLaps &&
+    playerProgress >= telemetry.lap - 0.11 &&
+    playerProgress < telemetry.lap;
+  const upcomingLapNum = Math.min(totalLaps, telemetry.lap + 1);
+
   const objectiveHeadline =
     mode === 'time-trial'
       ? `SET THE FASTEST ${totalLaps}-LAP TRACK RECORD`
       : mode === 'multiplayer'
-      ? `FINISH 1ST OR 2ND OVER ${totalLaps} ${lapLabel.toUpperCase()}`
-      : `FINISH 1ST OR 2ND — BEAT ${rivalCount} RIVALS`;
+      ? `FINISH TOP 3 OVER ${totalLaps} ${lapLabel.toUpperCase()}`
+      : `FINISH TOP 3 — BEAT ${rivalCount} RIVALS`;
 
   const objectiveRule =
     mode === 'time-trial'
       ? `Complete ${totalLaps} clean ${lapLabel.toLowerCase()} in the shortest total time to set a new personal best.`
-      : `Race ends the instant the leader completes ${totalLaps} ${lapLabel.toLowerCase()}. Finish 1st or 2nd to win — 3rd or lower loses!`;
+      : `Finish 1st, 2nd, or 3rd to win! If you are in 2nd or 3rd when the leader finishes, keep driving to cross the finish line — 4th or lower loses!`;
 
   return (
     <div
@@ -854,7 +899,7 @@ export function RaceHud({
                   <p className="text-[11px] sm:text-xs text-slate-200 mt-1 leading-snug font-medium">
                     {mode === 'time-trial'
                       ? 'Beat your best time to post a top rank on the Global Leaderboard.'
-                      : '1st: 500 Coins · 2nd: 300 Coins (Top 2 win the level)'}
+                      : '1st: 500 · 2nd: 300 · 3rd: 150 Coins (Top 3 win the level)'}
                   </p>
                 </div>
               </div>
@@ -880,16 +925,21 @@ export function RaceHud({
         </div>
       )}
 
-      {/* CENTER START LIGHTS COUNTDOWN (with Compact Race Objective Ribbon) */}
+      {/* CENTER START LIGHTS COUNTDOWN (Shows Lap 1 / Total before start!) */}
       {telemetry.countdown > 0 && !paused && !showObjective && (
-        <div className="self-center flex flex-col items-center gap-2.5">
-          <div className="-skew-x-12 px-4 py-1.5 bg-[#0B1424]/92 border border-[#FFD014]/70 shadow-xl">
+        <div className="self-center flex flex-col items-center gap-2">
+          <div className="-skew-x-12 px-5 py-1 bg-gradient-to-r from-[#E5252B] via-[#DC2626] to-[#B91C1C] border-2 border-[#FFD014] shadow-[0_6px_22px_rgba(229,37,43,0.45)]">
+            <div className="skew-x-12 font-display italic font-black text-sm sm:text-lg text-white tracking-wider whitespace-nowrap">
+              {totalLaps === 1 ? 'FINAL LAP · LAP 1 / 1' : `STARTING LAP ${telemetry.lap} / ${totalLaps}`}
+            </div>
+          </div>
+          <div className="-skew-x-12 px-4 py-1 bg-[#0B1424]/92 border border-[#FFD014]/70 shadow-xl">
             <div className="skew-x-12 flex items-center gap-2 text-[11px] sm:text-xs font-display italic font-black text-white whitespace-nowrap">
               <span className="px-1.5 py-0.5 bg-[#E5252B] text-[10px] text-white">OBJECTIVE</span>
               <span className="text-[#FFD014]">{objectiveHeadline}</span>
             </div>
           </div>
-          <div className="-skew-x-12 flex items-center gap-3 px-6 py-3 rounded-lg bg-[#0D1626]/92 border border-white/18 shadow-2xl">
+          <div className="-skew-x-12 flex items-center gap-3 px-6 py-2.5 rounded-lg bg-[#0D1626]/92 border border-white/18 shadow-2xl">
             {[3, 2, 1].map((n) => (
               <div
                 key={n}
@@ -904,6 +954,58 @@ export function RaceHud({
           <div className="font-display italic font-black text-7xl text-[#FFD014] drop-shadow-[0_4px_16px_rgba(0,0,0,0.7)] font-mono-tabular">
             {telemetry.countdown}
           </div>
+        </div>
+      )}
+
+      {/* LIVE LAP CONTINUATION & LEADER-FINISHED BANNERS (Non-blocking center-top cues!) */}
+      {telemetry.countdown <= 0 && !telemetry.finished && !paused && !showObjective && (
+        <div className="self-center flex flex-col items-center gap-2 pointer-events-none">
+          {telemetry.leaderFinished && mode !== 'time-trial' && telemetry.position <= 3 && (
+            <div className="-skew-x-12 px-5 py-1.5 bg-[#0B1424]/94 border-2 border-[#FFD014] shadow-[0_8px_24px_rgba(255,208,20,0.35)]">
+              <div className="skew-x-12 flex items-center gap-2 text-xs sm:text-sm font-display italic font-black text-[#FFD014] tracking-wide whitespace-nowrap">
+                <Flag className="w-4 h-4 shrink-0" />
+                <span>
+                  LEADER FINISHED · CROSS THE FINISH LINE FOR {formatOrdinal(telemetry.position)}!
+                </span>
+              </div>
+            </div>
+          )}
+
+          {lapBanner ? (
+            <div
+              className={`-skew-x-12 px-6 py-2 border-2 shadow-[0_10px_28px_rgba(0,0,0,0.6)] ${
+                lapBanner.isFinal
+                  ? 'bg-gradient-to-r from-[#B91C1C]/95 via-[#E5252B]/95 to-[#B91C1C]/95 border-[#FFD014]'
+                  : 'bg-[#0B1424]/92 border-[#FFD014]/85'
+              }`}
+            >
+              <div className="skew-x-12 text-center font-display italic font-black leading-tight whitespace-nowrap">
+                <div className="text-xl sm:text-3xl text-[#FFD014] tracking-wide">
+                  {lapBanner.isFinal
+                    ? `FINAL LAP · ${lapBanner.lap} / ${totalLaps}`
+                    : `LAP ${lapBanner.lap} / ${totalLaps}`}
+                </div>
+                <div className="text-[10px] sm:text-xs text-white tracking-widest mt-0.5">
+                  {lapBanner.isStart
+                    ? 'GREEN FLAG — GO!'
+                    : lapBanner.isFinal
+                    ? 'LAST LAP — PUSH TO THE FINISH LINE!'
+                    : `CONTINUING LAP ${lapBanner.lap}`}
+                </div>
+              </div>
+            </div>
+          ) : approachingNextLap ? (
+            <div className="-skew-x-12 px-5 py-1.5 bg-[#0B1424]/90 border-2 border-[#FFD014]/80 shadow-[0_8px_24px_rgba(0,0,0,0.55)]">
+              <div className="skew-x-12 flex items-center gap-2 text-xs sm:text-sm font-display italic font-black text-white tracking-wider whitespace-nowrap">
+                <span className="px-1.5 py-0.5 bg-[#FFD014] text-[#0B1220] text-[10px]">
+                  {upcomingLapNum === totalLaps ? 'FINAL LAP' : 'NEXT LAP'}
+                </span>
+                <span className="text-[#FFD014]">
+                  CONTINUING TO LAP {upcomingLapNum} / {totalLaps}
+                </span>
+              </div>
+            </div>
+          ) : null}
         </div>
       )}
 
@@ -1725,8 +1827,10 @@ export function RaceHud({
                     : isWinner
                     ? telemetry.position === 1
                       ? '1ST PLACE VICTORY!'
-                      : '2ND PLACE — LEVEL CLEARED!'
-                    : `FINISHED ${formatOrdinal(telemetry.position)} OF ${telemetry.totalRacers} — TOP 2 REQUIRED`}
+                      : telemetry.position === 2
+                      ? '2ND PLACE — PODIUM FINISH!'
+                      : '3RD PLACE — PODIUM FINISH!'
+                    : `FINISHED ${formatOrdinal(telemetry.position)} OF ${telemetry.totalRacers} — TOP 3 REQUIRED`}
                 </span>
               </div>
 

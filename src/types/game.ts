@@ -156,6 +156,7 @@ export interface RaceTelemetry {
   wrongWay: boolean;
   countdown: number; // 3,2,1,0,-1 (racing)
   finished: boolean;
+  leaderFinished?: boolean;
   cameraMode: CameraMode;
   minimapCars: Array<{
     id: string;
@@ -181,15 +182,17 @@ export interface RaceTelemetry {
   }>;
 }
 
-export const RACE_PRIZE_COINS: Record<1 | 2, number> = {
+export const RACE_PRIZE_COINS: Record<1 | 2 | 3, number> = {
   1: 500,
   2: 300,
+  3: 150,
 };
 
 export function getRacePrizeCoins(position: number, mode: GameMode): number {
   if (mode === 'time-trial') return 0;
   if (position === 1) return RACE_PRIZE_COINS[1];
   if (position === 2) return RACE_PRIZE_COINS[2];
+  if (position === 3) return RACE_PRIZE_COINS[3];
   return 0;
 }
 

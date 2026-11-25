@@ -462,7 +462,7 @@ export default function App() {
   useEffect(() => {
     gameMusic.setMuted(muted);
     if (inRace && telemetry.finished) {
-      const wonRace = selectedMode === 'time-trial' || telemetry.position <= 2;
+      const wonRace = selectedMode === 'time-trial' || telemetry.position <= 3;
       gameMusic.setMode(wonRace ? 'victory' : 'defeat');
     } else if (!inRace) {
       gameMusic.setMode('intro');
@@ -804,7 +804,7 @@ export default function App() {
         setCoins((prev) => prev + prizeCoins);
       }
 
-      if (result.completedAllLaps || result.position <= 2 || selectedMode === 'time-trial') {
+      if (result.completedAllLaps || result.position <= 3 || selectedMode === 'time-trial') {
         const res = await submitLeaderboardRecord({
           driverName: driverName.trim() || 'RACER_01',
           platform,
