@@ -7,12 +7,12 @@ import {VitePWA} from 'vite-plugin-pwa';
 
 export default defineConfig(() => {
   return {
+    base: './',
     plugins: [
       react(),
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
-        useCredentials: true,
         includeAssets: [
           'favicon.png',
           'apple-touch-icon.png',
@@ -22,7 +22,7 @@ export default defineConfig(() => {
           'assets/aistudio/ICON_49f818b7.jpeg',
         ],
         manifest: {
-          id: '/',
+          id: './',
           name: 'RUSH LINE — 3D Racing',
           short_name: 'RUSH LINE',
           description:
@@ -32,24 +32,24 @@ export default defineConfig(() => {
           display: 'standalone',
           display_override: ['fullscreen', 'standalone'],
           orientation: 'landscape',
-          start_url: '/',
-          scope: '/',
+          start_url: './',
+          scope: './',
           categories: ['games', 'racing'],
           icons: [
             {
-              src: '/pwa-192x192.png',
+              src: './pwa-192x192.png',
               sizes: '192x192',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-512x512.png',
+              src: './pwa-512x512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-maskable-512x512.png',
+              src: './pwa-maskable-512x512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'maskable',
@@ -62,6 +62,7 @@ export default defineConfig(() => {
           cleanupOutdatedCaches: true,
           maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          navigateFallback: 'index.html',
           navigateFallbackDenylist: [/^\/api\//, /^\/ws/],
           runtimeCaching: [
             {

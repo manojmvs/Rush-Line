@@ -28,10 +28,39 @@ export interface MultiplayerCallbacks {
   onError?: (message: string) => void;
 }
 
+const LOCAL_LEADERBOARD_KEY = 'rush-line-local-leaderboard-v1';
+
+function isStaticHosting(): boolean {
+  if (typeof window === 'undefined') return false;
+  const host = window.location.hostname.toLowerCase();
+  return host.endsWith('.github.io') || window.location.protocol === 'file:';
+}
+
+function readLocalLeaderboard(): LeaderboardEntry[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_LEADERBOARD_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as LeaderboardEntry[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalLeaderboard(entries: LeaderboardEntry[]): void {
+  try {
+    localStorage.setItem(LOCAL_LEADERBOARD_KEY, JSON.stringify(entries.slice(0, 80)));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
 export class MultiplayerClient {
   private ws: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closedManually = false;
+  private failedAttempts = 0;
+  private everConnected = false;
   private callbacks: MultiplayerCallbacks = {};
   public playerId = '';
 
@@ -40,6 +69,10 @@ export class MultiplayerClient {
   }
 
   public connect(): void {
+    if (isStaticHosting()) {
+      this.callbacks.onConnectionChange?.(false);
+      return;
+    }
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
@@ -52,6 +85,8 @@ export class MultiplayerClient {
       this.ws = ws;
 
       ws.onopen = () => {
+        this.failedAttempts = 0;
+        this.everConnected = true;
         this.callbacks.onConnectionChange?.(true);
       };
 
@@ -91,7 +126,9 @@ export class MultiplayerClient {
       ws.onclose = () => {
         this.callbacks.onConnectionChange?.(false);
         this.ws = null;
-        if (!this.closedManually) {
+        this.failedAttempts += 1;
+        // Stop retrying if backend WebSocket is absent (e.g. static hosting) after 2 failed attempts
+        if (!this.closedManually && (this.everConnected || this.failedAttempts < 2)) {
           this.reconnectTimer = setTimeout(() => this.connect(), 2500);
         }
       };
@@ -164,6 +201,7 @@ export class MultiplayerClient {
 }
 
 export async function fetchPublicRooms(): Promise<PublicRoomSummary[]> {
+  if (isStaticHosting()) return [];
   try {
     const res = await fetch('/api/rooms');
     if (!res.ok) return [];
@@ -179,15 +217,43 @@ export async function fetchLeaderboard(filters: {
   mode?: string;
   platform?: string;
 }): Promise<LeaderboardEntry[]> {
+  const filterLocal = () => {
+    let entries = readLocalLeaderboard();
+    if (filters.trackId && filters.trackId !== 'all') {
+      entries = entries.filter((e) => e.trackId === filters.trackId);
+    }
+    if (filters.mode && filters.mode !== 'all') {
+      entries = entries.filter((e) => e.mode === filters.mode);
+    }
+    if (filters.platform && filters.platform !== 'all') {
+      entries = entries.filter((e) =>
+        filters.platform === 'mobile'
+          ? e.platform === 'Mobile iOS' || e.platform === 'Mobile Android'
+          : e.platform === 'Desktop'
+      );
+    }
+    return entries.sort((a, b) => a.bestLapMs - b.bestLapMs);
+  };
+
+  if (isStaticHosting()) {
+    return filterLocal();
+  }
+
   const params = new URLSearchParams();
   if (filters.trackId && filters.trackId !== 'all') params.set('trackId', filters.trackId);
   if (filters.mode && filters.mode !== 'all') params.set('mode', filters.mode);
   if (filters.platform && filters.platform !== 'all') params.set('platform', filters.platform);
 
-  const res = await fetch(`/api/leaderboard?${params.toString()}`);
-  if (!res.ok) throw new Error('Unable to load leaderboard');
-  const data = await res.json();
-  return Array.isArray(data.entries) ? data.entries : [];
+  try {
+    const res = await fetch(`/api/leaderboard?${params.toString()}`);
+    if (!res.ok) return filterLocal();
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) return filterLocal();
+    const data = await res.json();
+    return Array.isArray(data.entries) ? data.entries : filterLocal();
+  } catch {
+    return filterLocal();
+  }
 }
 
 export async function submitLeaderboardRecord(payload: {
@@ -200,15 +266,34 @@ export async function submitLeaderboardRecord(payload: {
   totalTimeMs: number;
   topSpeedKmh: number;
 }): Promise<{ entry: LeaderboardEntry; trackRank: number } | null> {
+  const saveLocal = () => {
+    const entry: LeaderboardEntry = {
+      id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      ...payload,
+      createdAt: new Date().toISOString(),
+    };
+    const all = [...readLocalLeaderboard(), entry];
+    writeLocalLeaderboard(all);
+    const sameTrack = all
+      .filter((e) => e.trackId === payload.trackId)
+      .sort((a, b) => a.bestLapMs - b.bestLapMs);
+    const trackRank = sameTrack.findIndex((e) => e.id === entry.id) + 1;
+    return { entry, trackRank: Math.max(1, trackRank) };
+  };
+
+  if (isStaticHosting()) {
+    return saveLocal();
+  }
+
   try {
     const res = await fetch('/api/leaderboard', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) return null;
+    if (!res.ok) return saveLocal();
     return await res.json();
   } catch {
-    return null;
+    return saveLocal();
   }
 }

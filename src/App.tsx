@@ -926,7 +926,7 @@ export default function App() {
                       className="-skew-x-14 bg-[#FFD014] hover:bg-[#ffe04d] border border-[#FFD014] pl-1 pr-2.5 lg:pl-1.5 lg:pr-3.5 py-0.5 lg:py-1 flex items-center gap-1.5 lg:gap-2 text-[#0B1220] shadow-[0_4px_18px_rgba(255,208,20,0.45)] transition-colors"
                     >
                       <img
-                        src="/assets/aistudio/ICON_49f818b7.jpeg"
+                        src={`${import.meta.env.BASE_URL}assets/aistudio/ICON_49f818b7.jpeg`}
                         alt="RUSH LINE Icon"
                         className="skew-x-14 w-5 h-5 lg:w-6 lg:h-6 rounded-md object-cover border border-[#0B1220]/30 shrink-0"
                       />
@@ -1304,7 +1304,7 @@ export default function App() {
                   >
                     <span className="skew-x-10 flex items-center gap-2">
                       <img
-                        src="/assets/aistudio/ICON_49f818b7.jpeg"
+                        src={`${import.meta.env.BASE_URL}assets/aistudio/ICON_49f818b7.jpeg`}
                         alt="RUSH LINE Icon"
                         className="w-5 h-5 rounded object-cover"
                       />

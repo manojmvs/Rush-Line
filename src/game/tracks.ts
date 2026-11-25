@@ -190,7 +190,7 @@ export interface BreakablePart {
 
 export interface BreakableProp {
   id: number;
-  kind: 'pole' | 'bollard' | 'fence' | 'sign' | 'umbrella';
+  kind: 'pole' | 'bollard' | 'fence' | 'sign' | 'umbrella' | 'tree' | 'bench' | 'pot';
   x: number;
   y: number;
   z: number;
@@ -292,27 +292,33 @@ export function knockBreakableProp(
   prop.fallDirZ = dirZ;
 
   const speedNorm = THREE.MathUtils.clamp((hitSpeed - 3) / 42, 0, 1);
-  const isLight = prop.kind === 'bollard' || prop.kind === 'umbrella' || prop.kind === 'sign';
+  const isLight =
+    prop.kind === 'bollard' ||
+    prop.kind === 'umbrella' ||
+    prop.kind === 'sign' ||
+    prop.kind === 'pot';
+  const isBench = prop.kind === 'bench';
   const isFence = prop.kind === 'fence';
-  const massScale = isLight ? 1.18 : isFence ? 0.92 : 0.85;
+  const isTree = prop.kind === 'tree';
+  const massScale = isLight ? 1.2 : isBench ? 1.04 : isFence ? 0.92 : isTree ? 0.72 : 0.85;
 
-  // Slow hit -> topples forward where it stands; Fast hit -> launches & skids across the road!
+  // Slow hit -> topples forward where it stands; Fast hit -> launches & tumbles across the road!
   const fwdLaunch =
     hitSpeed < 9
       ? hitSpeed * 0.24 * massScale
-      : Math.min(27, (hitSpeed * (0.36 + speedNorm * 0.24)) * massScale);
+      : Math.min(27, hitSpeed * (0.36 + speedNorm * 0.24) * massScale);
   prop.vx = dirX * fwdLaunch;
   prop.vz = dirZ * fwdLaunch;
-  prop.vy = (0.75 + speedNorm * (isLight ? 5.6 : 4.2)) * massScale;
+  prop.vy = (0.75 + speedNorm * (isLight ? 5.6 : isTree ? 3.2 : 4.2)) * massScale;
 
   // Angular fall velocity scales strongly with hit speed
   prop.tiltAngle = 0.08;
-  prop.tiltVel = (2.6 + speedNorm * 7.8) * massScale;
+  prop.tiltVel = (2.6 + speedNorm * (isTree ? 6.2 : 7.8)) * massScale;
 
   // Side-swipe spin around vertical axis
   const cross = pushX * dirZ - pushZ * dirX;
   const spinSign = cross >= 0 ? 1 : -1;
-  prop.spinVel = spinSign * (0.45 + speedNorm * (isLight ? 4.4 : 2.6));
+  prop.spinVel = spinSign * (0.45 + speedNorm * (isLight ? 4.4 : isTree ? 1.9 : 2.6));
 }
 
 /**
@@ -335,7 +341,17 @@ export function stepBreakables(breakables: BreakableProp[], dt: number): void {
     p.vy -= GRAVITY * dt;
     p.posY += p.vy * dt;
 
-    const restY = p.groundY + (p.kind === 'fence' ? 0.14 : 0.18);
+    const restY =
+      p.groundY +
+      (p.kind === 'tree'
+        ? 0.42
+        : p.kind === 'pot'
+        ? 0.28
+        : p.kind === 'bench'
+        ? 0.24
+        : p.kind === 'fence'
+        ? 0.14
+        : 0.18);
     if (p.posY <= restY) {
       p.posY = restY;
       if (p.vy < -1.45 && p.bounceCount < 2) {
@@ -3975,7 +3991,7 @@ export function buildTrackScene(
       addInstBatch(vespaSeatGeo, leatherSeatMat, vespaItems, false);
     }
 
-    // Terracotta Planter Pots with Slender Mediterranean Cypress / Olive Trees along the piazza sidewalks
+    // Terracotta Planter Pots with Slender Mediterranean Cypress / Olive Trees along the piazza sidewalks (movable!)
     const potGeo = new THREE.CylinderGeometry(0.42, 0.30, 0.65, 8);
     potGeo.translate(0, 0.32, 0);
     const cypressGeo = new THREE.ConeGeometry(0.62, 3.1, 7);
@@ -3986,6 +4002,7 @@ export function buildTrackScene(
       flatShading: true,
     });
     const potItems: PlacedInst[] = [];
+    const potMeta: Array<{ x: number; y: number; z: number; groundY: number; sampleIdx: number }> = [];
     for (let i = 10; i < samples.length - 8; i += 14) {
       if (getCityStreetTightness(i, samples.length) > 0.35) continue;
       if (diversions.some((d) => i >= d.startIdx - 10 && i <= d.endIdx + 10)) continue;
@@ -3995,16 +4012,33 @@ export function buildTrackScene(
       const px = s.pos.x + s.right.x * side * lat;
       const pz = s.pos.z + s.right.z * side * lat;
       pushBox(potItems, px, 0.22, pz, 0, 1, 1, 1);
-      poleColliders.push({
-        x: px,
-        z: pz,
-        radius: 0.5,
-        sampleIdx: i,
-      });
+      potMeta.push({ x: px, y: 0.22, z: pz, groundY: s.pos.y + 0.1, sampleIdx: i });
     }
     if (potItems.length > 0) {
-      addInstBatch(potGeo, flowerPotMat, potItems, false);
-      addInstBatch(cypressGeo, cypressMat, potItems, false);
+      const cypressPotInst = new THREE.InstancedMesh(potGeo, flowerPotMat, potItems.length);
+      const cypressTreeInst = new THREE.InstancedMesh(cypressGeo, cypressMat, potItems.length);
+      for (let pIdx = 0; pIdx < potItems.length; pIdx++) {
+        const item = potItems[pIdx];
+        const meta = potMeta[pIdx];
+        cypressPotInst.setMatrixAt(pIdx, item.matrix);
+        cypressTreeInst.setMatrixAt(pIdx, item.matrix);
+        const breakableId = registerBreakable('tree', meta.x, meta.y, meta.z, meta.groundY, [
+          { mesh: cypressPotInst, instanceId: pIdx, worldMatrix: item.matrix },
+          { mesh: cypressTreeInst, instanceId: pIdx, worldMatrix: item.matrix },
+        ]);
+        poleColliders.push({
+          x: meta.x,
+          z: meta.z,
+          radius: 0.48,
+          sampleIdx: meta.sampleIdx,
+          breakableId,
+        });
+      }
+      cypressPotInst.instanceMatrix.needsUpdate = true;
+      cypressTreeInst.instanceMatrix.needsUpdate = true;
+      cypressPotInst.computeBoundingSphere();
+      cypressTreeInst.computeBoundingSphere();
+      group.add(cypressPotInst, cypressTreeInst);
     }
 
     // Outdoor Trattoria Cafe Umbrellas tucked along wide Italian piazzas
@@ -4663,18 +4697,26 @@ export function buildTrackScene(
     dummy.scale.set(s, sy, s);
     dummy.updateMatrix();
 
-    trunkInst.setMatrixAt(tCount, dummy.matrix);
-    tier1Inst.setMatrixAt(tCount, dummy.matrix);
-    tier2Inst.setMatrixAt(tCount, dummy.matrix);
-    tier3Inst.setMatrixAt(tCount, dummy.matrix);
+    const treeWorldMat = dummy.matrix.clone();
+    trunkInst.setMatrixAt(tCount, treeWorldMat);
+    tier1Inst.setMatrixAt(tCount, treeWorldMat);
+    tier2Inst.setMatrixAt(tCount, treeWorldMat);
+    tier3Inst.setMatrixAt(tCount, treeWorldMat);
 
-    // Every pine tree within drivable side-road range acts as a solid trunk blocker!
+    // Every pine tree within drivable side-road range is now a movable knock-downable object!
     if (dist < barrierOffset + 42) {
+      const breakableId = registerBreakable('tree', x, gy - 0.15, z, gy + 0.08, [
+        { mesh: trunkInst, instanceId: tCount, worldMatrix: treeWorldMat },
+        { mesh: tier1Inst, instanceId: tCount, worldMatrix: treeWorldMat },
+        { mesh: tier2Inst, instanceId: tCount, worldMatrix: treeWorldMat },
+        { mesh: tier3Inst, instanceId: tCount, worldMatrix: treeWorldMat },
+      ]);
       poleColliders.push({
         x,
         z,
-        radius: 0.74 * s,
+        radius: 0.68 * s,
         sampleIdx,
+        breakableId,
       });
     }
 
@@ -5141,6 +5183,393 @@ export function buildTrackScene(
     group.add(sg);
   }
 
+  // =========================================================================
+  // 12. DECORATIVE MULTI-PART STREET BENCHES & COLORFUL TERRACOTTA FLOWER POTS
+  //     Fills empty sidewalks, piazzas, promenades & roadside verges on ALL tracks
+  //     (Every bench & flower pot is a speed-based movable knock-down object!)
+  // =========================================================================
+  // A. 4-Part Cast-Iron & Cedar Wood Park/Street Bench (2.1m wide, grounded bottom-center)
+  const benchLegGeo = new THREE.BoxGeometry(0.12, 0.74, 0.62);
+  benchLegGeo.translate(0, 0.37, 0);
+  const benchSeatGeo = new THREE.BoxGeometry(2.05, 0.09, 0.56);
+  benchSeatGeo.translate(0, 0.46, 0.04);
+  const benchBackGeo = new THREE.BoxGeometry(2.05, 0.42, 0.08);
+  benchBackGeo.rotateX(-0.18);
+  benchBackGeo.translate(0, 0.80, -0.24);
+  const benchBraceGeo = new THREE.BoxGeometry(1.96, 0.08, 0.08);
+  benchBraceGeo.translate(0, 0.24, 0);
+
+  const benchIronMat = new THREE.MeshStandardMaterial({
+    color: isNight ? 0x1e242d : 0x26313d,
+    roughness: 0.42,
+    metalness: 0.68,
+  });
+  const benchWoodMat = new THREE.MeshStandardMaterial({
+    color: isNight ? 0x5c371d : 0xa15c2c,
+    roughness: 0.78,
+    metalness: 0.04,
+  });
+
+  // B. 4-Part Sculpted Lathe Terracotta Flower Pot + Potting Soil + Foliage + Vibrant Blooms
+  const urnProfile = [
+    new THREE.Vector2(0.0, 0.0),
+    new THREE.Vector2(0.27, 0.0),
+    new THREE.Vector2(0.32, 0.14),
+    new THREE.Vector2(0.41, 0.44),
+    new THREE.Vector2(0.46, 0.58),
+    new THREE.Vector2(0.49, 0.66),
+    new THREE.Vector2(0.43, 0.69),
+    new THREE.Vector2(0.38, 0.64),
+  ];
+  const decoPotGeo = new THREE.LatheGeometry(urnProfile, 10);
+  const decoPotMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.74,
+    metalness: 0.05,
+  });
+
+  const decoSoilGeo = new THREE.CylinderGeometry(0.39, 0.36, 0.08, 8);
+  decoSoilGeo.translate(0, 0.62, 0);
+  const decoSoilMat = new THREE.MeshStandardMaterial({
+    color: isNight ? 0x241710 : 0x422a1b,
+    roughness: 0.96,
+    metalness: 0.0,
+  });
+
+  const decoLeafGeo = new THREE.DodecahedronGeometry(0.44, 0);
+  decoLeafGeo.scale(1.15, 0.78, 1.15);
+  decoLeafGeo.translate(0, 0.88, 0);
+  const decoLeafMat = new THREE.MeshStandardMaterial({
+    color: isNight ? 0x1d4d24 : 0x338a36,
+    roughness: 0.82,
+    metalness: 0.02,
+    flatShading: true,
+  });
+
+  const decoBloomGeo = new THREE.DodecahedronGeometry(0.22, 0);
+  decoBloomGeo.translate(0, 1.12, 0);
+  const decoBloomMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.58,
+    metalness: 0.02,
+    emissive: isNight ? 0x1e1418 : 0x000000,
+    emissiveIntensity: isNight ? 0.35 : 0,
+    flatShading: true,
+  });
+
+  interface PlacedBench {
+    x: number;
+    y: number;
+    z: number;
+    groundY: number;
+    yaw: number;
+    sampleIdx: number;
+  }
+  interface PlacedFlowerPot {
+    x: number;
+    y: number;
+    z: number;
+    groundY: number;
+    scale: number;
+    potTint: number;
+    bloomTint: number;
+    sampleIdx: number;
+  }
+
+  const placedBenches: PlacedBench[] = [];
+  const placedPots: PlacedFlowerPot[] = [];
+
+  const potTints = isNight
+    ? [0x7d3b24, 0x8f4c2f, 0x7a5738, 0x6b3a2c]
+    : [0xc95d36, 0xd87444, 0xb84f2e, 0xc89a65, 0xb3643c];
+  const bloomPalette = [
+    0xef4444, // vibrant geranium red
+    0xf59e0b, // sunny marigold gold
+    0xec4899, // Mediterranean bougainvillea pink
+    0xa855f7, // lavender violet
+    0xf97316, // warm coral orange
+    0xfef3c7, // cream jasmine white
+  ];
+
+  const pushDecorPot = (
+    x: number,
+    y: number,
+    z: number,
+    groundY: number,
+    sampleIdx: number,
+    scale = 1.0
+  ) => {
+    const idx = placedPots.length;
+    placedPots.push({
+      x,
+      y,
+      z,
+      groundY,
+      scale,
+      potTint: potTints[idx % potTints.length],
+      bloomTint: bloomPalette[idx % bloomPalette.length],
+      sampleIdx,
+    });
+  };
+
+  if (isCity) {
+    // City Track: line wide Italian sidewalks, piazza stretches & storefronts with welcoming benches & vibrant flower pots!
+    const cityHalfRoadFn = (idx: number) =>
+      halfRoad - getCityStreetTightness(idx, samples.length) * 2.85;
+
+    for (let i = 6; i < samples.length - 6; i += 9) {
+      const insideDiv = diversions.some((d) => i >= d.startIdx - 10 && i <= d.endIdx + 10);
+      const s = samples[i];
+      const tightness = getCityStreetTightness(i, samples.length);
+      const roadHalf = cityHalfRoadFn(i);
+      const roadYaw = Math.atan2(s.tangent.x, s.tangent.z);
+
+      if (insideDiv) {
+        // Flower pots decorating the stone central diversion median between twin lamps!
+        if (i % 18 === 6) {
+          pushDecorPot(s.pos.x, s.pos.y + 0.30, s.pos.z, s.pos.y + 0.10, i, 1.08);
+        }
+        continue;
+      }
+
+      if (tightness <= 0.35) {
+        // Wide Italian boulevards & piazzas: benches facing the street flanked by colorful terracotta flower pots!
+        const side = (i % 18 === 6 ? -1 : 1) as -1 | 1;
+        const benchLat = roadHalf + 2.55;
+        const bx = s.pos.x + s.right.x * side * benchLat;
+        const bz = s.pos.z + s.right.z * side * benchLat;
+        // Local +Z faces toward the street center from either side
+        const faceYaw = side === -1 ? roadYaw + Math.PI * 0.5 : roadYaw - Math.PI * 0.5;
+        placedBenches.push({
+          x: bx,
+          y: s.pos.y + 0.21,
+          z: bz,
+          groundY: s.pos.y + 0.10,
+          yaw: faceYaw,
+          sampleIdx: i,
+        });
+
+        // Pair a vibrant flower pot beside the bench + one on the opposite sidewalk!
+        pushDecorPot(
+          bx + s.tangent.x * 1.48,
+          s.pos.y + 0.21,
+          bz + s.tangent.z * 1.48,
+          s.pos.y + 0.10,
+          i,
+          0.95 + (i % 3) * 0.08
+        );
+        const oppLat = roadHalf + 2.05;
+        pushDecorPot(
+          s.pos.x - s.right.x * side * oppLat,
+          s.pos.y + 0.21,
+          s.pos.z - s.right.z * side * oppLat,
+          s.pos.y + 0.10,
+          i,
+          0.9 + (i % 4) * 0.07
+        );
+      } else if (i % 18 === 6) {
+        // Narrow vicolo alleys: tuck compact colorful terracotta flower pots flush against storefront walls
+        const side = (i % 36 === 6 ? -1 : 1) as -1 | 1;
+        const potLat = roadHalf + 1.35;
+        pushDecorPot(
+          s.pos.x + s.right.x * side * potLat,
+          s.pos.y + 0.19,
+          s.pos.z + s.right.z * side * potLat,
+          s.pos.y + 0.10,
+          i,
+          0.84
+        );
+      }
+    }
+  } else {
+    // Non-City Tracks (Racing, Stadium, Hill, Off-Road, Riverside, Go-Kart):
+    // Decorate empty roadside verges, spectator promenades, overlooks & paddock borders with benches & flower pots!
+    const step = isStadium || isGoKart ? 11 : 13;
+    for (let i = 10; i < samples.length - 10; i += step) {
+      const insideDiv = diversions.some((d) => i >= d.startIdx - 10 && i <= d.endIdx + 10);
+      if (insideDiv) continue;
+      const s = samples[i];
+      const side = (Math.floor(i / step) % 2 === 0 ? -1 : 1) as -1 | 1;
+      // Keep Riverside's right-hand water channel dry!
+      if (isRiverside && side === 1) continue;
+
+      const vergeDist =
+        isStadium
+          ? barrierOffset + 1.85
+          : isOffroad || isRiverside
+          ? halfRoad + kerbWidth + 3.2
+          : barrierOffset + 2.6;
+      const bx = s.pos.x + s.right.x * side * vergeDist;
+      const bz = s.pos.z + s.right.z * side * vergeDist;
+      if (!isClearOfTrack(bx, bz, halfRoad + kerbWidth + 1.4)) continue;
+      if (isInsidePond(bx, bz)) continue;
+
+      const { y: gy } = sampleTerrainHeight(bx, bz);
+      const roadYaw = Math.atan2(s.tangent.x, s.tangent.z);
+      const faceYaw = side === -1 ? roadYaw + Math.PI * 0.5 : roadYaw - Math.PI * 0.5;
+      placedBenches.push({
+        x: bx,
+        y: gy,
+        z: bz,
+        groundY: gy,
+        yaw: faceYaw,
+        sampleIdx: i,
+      });
+
+      // Flanking flower pots on both ends of each roadside bench!
+      for (const endSign of [-1, 1]) {
+        const px = bx + s.tangent.x * endSign * 1.52;
+        const pz = bz + s.tangent.z * endSign * 1.52;
+        if (!isClearOfTrack(px, pz, halfRoad + kerbWidth + 1.2)) continue;
+        const { y: pgy } = sampleTerrainHeight(px, pz);
+        pushDecorPot(px, pgy, pz, pgy, i, 0.95 + ((i + (endSign > 0 ? 1 : 0)) % 3) * 0.1);
+      }
+
+      // Opposite roadside colorful flower pot cluster to balance the visual horizon!
+      const oppSide = -side;
+      if (!(isRiverside && oppSide === 1)) {
+        const oppDist =
+          isOffroad || isRiverside ? halfRoad + kerbWidth + 2.85 : barrierOffset + 2.35;
+        const ox = s.pos.x + s.right.x * oppSide * oppDist;
+        const oz = s.pos.z + s.right.z * oppSide * oppDist;
+        if (isClearOfTrack(ox, oz, halfRoad + kerbWidth + 1.2) && !isInsidePond(ox, oz)) {
+          const { y: ogy } = sampleTerrainHeight(ox, oz);
+          pushDecorPot(ox, ogy, oz, ogy, i, 1.06);
+        }
+      }
+    }
+  }
+
+  // Instantiate all 4-part benches as knock-downable BreakableProps!
+  if (placedBenches.length > 0) {
+    const bCount = placedBenches.length;
+    const benchLegInst = new THREE.InstancedMesh(benchLegGeo, benchIronMat, bCount * 2);
+    const benchSeatInst = new THREE.InstancedMesh(benchSeatGeo, benchWoodMat, bCount);
+    const benchBackInst = new THREE.InstancedMesh(benchBackGeo, benchWoodMat, bCount);
+    const benchBraceInst = new THREE.InstancedMesh(benchBraceGeo, benchIronMat, bCount);
+
+    for (let bi = 0; bi < bCount; bi++) {
+      const b = placedBenches[bi];
+      const cosY = Math.cos(b.yaw);
+      const sinY = Math.sin(b.yaw);
+
+      dummy.position.set(b.x, b.y, b.z);
+      dummy.rotation.set(0, b.yaw, 0);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      const baseMat = dummy.matrix.clone();
+      benchSeatInst.setMatrixAt(bi, baseMat);
+      benchBackInst.setMatrixAt(bi, baseMat);
+      benchBraceInst.setMatrixAt(bi, baseMat);
+
+      // Left & right cast-iron leg frames offset ±0.88m along bench local X
+      const legMats: THREE.Matrix4[] = [];
+      for (let li = 0; li < 2; li++) {
+        const lx = li === 0 ? -0.88 : 0.88;
+        dummy.position.set(b.x + cosY * lx, b.y, b.z - sinY * lx);
+        dummy.rotation.set(0, b.yaw, 0);
+        dummy.scale.set(1, 1, 1);
+        dummy.updateMatrix();
+        const lm = dummy.matrix.clone();
+        benchLegInst.setMatrixAt(bi * 2 + li, lm);
+        legMats.push(lm);
+      }
+
+      const breakableId = registerBreakable('bench', b.x, b.y, b.z, b.groundY, [
+        { mesh: benchLegInst, instanceId: bi * 2, worldMatrix: legMats[0] },
+        { mesh: benchLegInst, instanceId: bi * 2 + 1, worldMatrix: legMats[1] },
+        { mesh: benchSeatInst, instanceId: bi, worldMatrix: baseMat },
+        { mesh: benchBackInst, instanceId: bi, worldMatrix: baseMat },
+        { mesh: benchBraceInst, instanceId: bi, worldMatrix: baseMat },
+      ]);
+      boxColliders.push({
+        x: b.x,
+        z: b.z,
+        halfW: 1.04,
+        halfD: 0.34,
+        cosYaw: cosY,
+        sinYaw: sinY,
+        sampleIdx: b.sampleIdx,
+        breakableId,
+      });
+    }
+
+    for (const inst of [benchLegInst, benchSeatInst, benchBackInst, benchBraceInst]) {
+      inst.instanceMatrix.needsUpdate = true;
+      inst.castShadow = !lowPower;
+      inst.computeBoundingSphere();
+      group.add(inst);
+    }
+  }
+
+  // Instantiate all 4-part terracotta flower pots with vibrant multi-color blossoms (movable!)
+  if (placedPots.length > 0) {
+    const pCount = placedPots.length;
+    const potBodyInst = new THREE.InstancedMesh(decoPotGeo, decoPotMat, pCount);
+    const potSoilInst = new THREE.InstancedMesh(decoSoilGeo, decoSoilMat, pCount);
+    const potLeafInst = new THREE.InstancedMesh(decoLeafGeo, decoLeafMat, pCount);
+    const potBloomInst = new THREE.InstancedMesh(decoBloomGeo, decoBloomMat, pCount * 3);
+
+    const bloomOffsets: Array<[number, number, number]> = [
+      [0.0, 0.04, 0.0],
+      [0.21, -0.08, 0.14],
+      [-0.20, -0.07, -0.15],
+    ];
+
+    for (let pi = 0; pi < pCount; pi++) {
+      const p = placedPots[pi];
+      dummy.position.set(p.x, p.y, p.z);
+      dummy.rotation.set(0, (pi * 1.17) % (Math.PI * 2), 0);
+      dummy.scale.set(p.scale, p.scale, p.scale);
+      dummy.updateMatrix();
+      const baseMat = dummy.matrix.clone();
+
+      potBodyInst.setMatrixAt(pi, baseMat);
+      potSoilInst.setMatrixAt(pi, baseMat);
+      potLeafInst.setMatrixAt(pi, baseMat);
+
+      colorTmp.setHex(p.potTint);
+      potBodyInst.setColorAt(pi, colorTmp);
+
+      const parts: Array<{ mesh: THREE.InstancedMesh; instanceId: number; worldMatrix: THREE.Matrix4 }> = [
+        { mesh: potBodyInst, instanceId: pi, worldMatrix: baseMat },
+        { mesh: potSoilInst, instanceId: pi, worldMatrix: baseMat },
+        { mesh: potLeafInst, instanceId: pi, worldMatrix: baseMat },
+      ];
+
+      for (let k = 0; k < 3; k++) {
+        const [ox, oy, oz] = bloomOffsets[k];
+        dummy.position.set(p.x + ox * p.scale, p.y + oy * p.scale, p.z + oz * p.scale);
+        dummy.rotation.set(0, pi * 0.7 + k * 2.1, 0);
+        const bs = p.scale * (k === 0 ? 1.05 : 0.82);
+        dummy.scale.set(bs, bs, bs);
+        dummy.updateMatrix();
+        const bm = dummy.matrix.clone();
+        const bloomIdx = pi * 3 + k;
+        potBloomInst.setMatrixAt(bloomIdx, bm);
+        colorTmp.setHex(k === 0 ? p.bloomTint : bloomPalette[(pi + k * 2) % bloomPalette.length]);
+        potBloomInst.setColorAt(bloomIdx, colorTmp);
+        parts.push({ mesh: potBloomInst, instanceId: bloomIdx, worldMatrix: bm });
+      }
+
+      const breakableId = registerBreakable('pot', p.x, p.y, p.z, p.groundY, parts);
+      poleColliders.push({
+        x: p.x,
+        z: p.z,
+        radius: 0.42 * p.scale,
+        sampleIdx: p.sampleIdx,
+        breakableId,
+      });
+    }
+
+    for (const inst of [potBodyInst, potSoilInst, potLeafInst, potBloomInst]) {
+      inst.instanceMatrix.needsUpdate = true;
+      if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
+      inst.computeBoundingSphere();
+      group.add(inst);
+    }
+  }
+
   disposables.push(
     chevLeftTex,
     chevRightTex,
@@ -5152,7 +5581,21 @@ export function buildTrackScene(
     driftArchTex,
     driftArchMat,
     sectorPostGeo,
-    sectorBeamGeo
+    sectorBeamGeo,
+    benchLegGeo,
+    benchSeatGeo,
+    benchBackGeo,
+    benchBraceGeo,
+    benchIronMat,
+    benchWoodMat,
+    decoPotGeo,
+    decoPotMat,
+    decoSoilGeo,
+    decoSoilMat,
+    decoLeafGeo,
+    decoLeafMat,
+    decoBloomGeo,
+    decoBloomMat
   );
 
   return {

@@ -153,12 +153,25 @@ export function useAppUpdater({ deferReload, serverVersion }: UseAppUpdaterOptio
         void swRegistration.update().catch(() => undefined);
       }
 
+      const isStaticHost =
+        typeof window !== 'undefined' &&
+        (window.location.hostname.toLowerCase().endsWith('.github.io') ||
+          window.location.protocol === 'file:');
+      if (isStaticHost) {
+        if (manual) {
+          setStatus('up-to-date');
+          window.setTimeout(() => setStatus((s) => (s === 'up-to-date' ? 'idle' : s)), 2600);
+        }
+        return false;
+      }
+
       try {
         const res = await fetch(`/api/version?_t=${Date.now()}`, {
           cache: 'no-store',
           headers: { 'Cache-Control': 'no-cache' },
         });
-        if (!res.ok) {
+        const contentType = res.headers.get('content-type') || '';
+        if (!res.ok || !contentType.includes('application/json')) {
           if (manual) setStatus('idle');
           return false;
         }

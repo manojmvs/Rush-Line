@@ -1309,7 +1309,7 @@ export function RaceCanvas({
         const shouldStampSkid = skidStampAccum >= 0.028;
         if (shouldStampSkid) skidStampAccum = 0;
 
-        const isPlayerDrifting = !playerCar.airborne && playerCar.driftIntensity > 0.18 && Math.abs(playerCar.speed) > 9;
+        const isPlayerDrifting = !playerCar.airborne && playerCar.driftIntensity > 0.14 && Math.abs(playerCar.speed) > 5.8;
         const kickUpDust =
           !playerCar.airborne &&
           (isPlayerDrifting ||

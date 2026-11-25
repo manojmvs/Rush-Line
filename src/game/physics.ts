@@ -548,19 +548,21 @@ export function stepCarPhysics(
     }
   } else {
     // AUTOMATIC 6-SPEED TRANSMISSION: Speed-matched with crisp hysteresis
-    // Dedicated mobile BRAKE never shifts into reverse; desktop S/Down only shifts to R when stopped
+    // NEVER auto-shift into Reverse simply because a wall/obstacle bounce pushed vForward negative!
+    // Only engage Reverse when the player explicitly holds Brake/S while stopped (not pressing Gas).
     const desktopReverseIntent =
       !input.touchBrake && input.brake > 0.25 && vForward <= 0.8 && input.throttle < 0.1;
-    if (vForward < -0.5 || desktopReverseIntent) {
+    if (desktopReverseIntent) {
       if (car.gear !== -1) {
         car.gear = -1;
         car.shiftCooldown = 0.16;
         shiftedGear = -1;
       }
     } else {
-      if (car.gear === -1 && (input.throttle > 0.1 || vForward > 0.3)) {
+      // Pressing throttle (or rolling forward without reverse intent) ALWAYS exits Reverse into 1st immediately!
+      if (car.gear === -1 && (input.throttle > 0.08 || (!input.reverse && vForward > -0.2))) {
         car.gear = 1;
-        car.shiftCooldown = 0.14;
+        car.shiftCooldown = 0.12;
         shiftedGear = 1;
       }
 
@@ -645,10 +647,20 @@ export function stepCarPhysics(
   const baseDriveAccel = (spec.basePowerKw * engineMult * 15.5) / spec.massKg;
   let longAccel = 0;
 
+  const absSteerIn = Math.abs(input.steer);
+  // Intentional Brake + Steer Drift: tapping/holding Brake while turning at speed initiates a real trail-brake powerslide!
+  const isBrakeDrifting =
+    !car.airborne &&
+    !input.reverse &&
+    car.gear >= 1 &&
+    input.brake > 0.08 &&
+    absSteerIn > 0.16 &&
+    vForward > 5.8;
+
   car.braking = false;
 
-  if (isPureBrake) {
-    // Mobile BRAKE pedal ALWAYS slows both forward and reverse speed cleanly to 0 — NEVER accelerates!
+  if (isPureBrake && !isBrakeDrifting) {
+    // Straight-line mobile BRAKE pedal slows both forward and reverse speed cleanly to 0 — NEVER reverses!
     car.braking = true;
     const brakePower = input.brake * 28.5 * surfaceGrip;
     if (vForward > 0.08) {
@@ -719,7 +731,13 @@ export function stepCarPhysics(
     const activeCeiling = Math.min(rawCeiling, baseTopSpeedMs * surfaceSpeedFactor * driftBoostCap);
 
     if (input.throttle > 0.02) {
-      if (vForward <= activeCeiling * 0.975) {
+      if (vForward < 0) {
+        // Recovering immediately after an obstacle rebound: strong arrest + forward launch!
+        longAccel += rawDriveForce * 1.45 + 14.0 * surfaceGrip;
+      } else if (isBrakeDrifting) {
+        // Holding Throttle + Brake + Steer together sustains a high-momentum powerslide through hairpins!
+        longAccel += rawDriveForce * 0.56;
+      } else if (vForward <= activeCeiling * 0.975) {
         // Full gear-multiplied acceleration up to 97.5% of the active surface/gear speed band
         longAccel += rawDriveForce;
       } else if (vForward <= activeCeiling * 1.01) {
@@ -732,7 +750,7 @@ export function stepCarPhysics(
         // Keep partial sustaining throttle so speed bleeds down GRADUALLY (~4-5 km/h/s), NEVER a sudden drop!
         longAccel += Math.max(0, naturalResist * 0.65);
       }
-    } else if (vForward > 1.5) {
+    } else if (vForward > 1.5 && !isBrakeDrifting) {
       // Gentle natural engine braking when coasting off-throttle
       longAccel -= 0.45 * gearTorque;
     }
@@ -756,10 +774,15 @@ export function stepCarPhysics(
     }
 
     if (input.brake > 0.02) {
-      if (vForward > 1.0) {
+      if (isBrakeDrifting) {
+        // Modulated trail-braking during Brake + Steer drift: carries speed sideways instead of dead-stopping!
+        car.braking = true;
+        const driftBrakeDecel = input.throttle > 0.15 ? 6.8 : 11.8;
+        longAccel -= input.brake * driftBrakeDecel * surfaceGrip;
+      } else if (vForward > 1.0) {
         car.braking = true;
         longAccel -= input.brake * 27.5 * surfaceGrip;
-      } else if (transmission === 'auto' && !input.reverse) {
+      } else if (transmission === 'auto' && !input.reverse && !input.touchBrake && input.throttle < 0.1) {
         longAccel -= input.brake * 10.0;
       }
     }
@@ -788,18 +811,17 @@ export function stepCarPhysics(
     ? 1.24
     : 1.12;
 
-  const absSteerIn = Math.abs(input.steer);
-  if (absSteerIn > 0.25 && absSpeed > 9 && !car.airborne) {
-    car.steerHoldTime = Math.min(1.6, car.steerHoldTime + dt * (0.85 + absSteerIn * 0.95));
+  if (absSteerIn > 0.22 && absSpeed > 6.5 && !car.airborne) {
+    car.steerHoldTime = Math.min(1.6, car.steerHoldTime + dt * (0.95 + absSteerIn * 1.05));
   } else {
-    car.steerHoldTime = Math.max(0, car.steerHoldTime - dt * 3.4);
+    car.steerHoldTime = Math.max(0, car.steerHoldTime - dt * 3.2);
   }
 
   // Sharp turn-in speed scale: crisp authority at mid-corner speed, rock-steady on straights
-  const speedSteerScale = 1 / (1 + absSpeed * 0.044 + absSpeed * absSpeed * 0.00058);
+  const speedSteerScale = 1 / (1 + absSpeed * 0.042 + absSpeed * absSpeed * 0.00054);
   const targetSteer = -input.steer * spec.maxSteerRad * speedSteerScale;
   const highSpeedFactor = THREE.MathUtils.clamp(absSpeed / 52, 0, 1);
-  const steerLambda = absSteerIn > 0.01 ? THREE.MathUtils.lerp(8.2, 5.4, highSpeedFactor) : 14.0;
+  const steerLambda = absSteerIn > 0.01 ? THREE.MathUtils.lerp(9.2, 5.8, highSpeedFactor) : 14.0;
   car.steerAngle = THREE.MathUtils.damp(car.steerAngle, targetSteer, steerLambda, dt);
   if (absSteerIn < 0.01 && Math.abs(car.steerAngle) < 0.0008) {
     car.steerAngle = 0;
@@ -809,30 +831,45 @@ export function stepCarPhysics(
   const downforceBonus = 1 + 0.00026 * aeroDownforce * vForward * vForward;
   const totalGrip = spec.baseGrip * tireGripMult * surfaceGrip * downforceBonus;
 
-  // Automatic Corner-Drift Engagement Model:
-  // Triggers naturally from cornering speed + steering angle + sustained turn + optional brake weight-transfer!
-  const minDriftSpeed = isDirtTrack ? 10.5 : 13.5;
-  const speedDriftFactor = THREE.MathUtils.clamp((absSpeed - minDriftSpeed) / 20, 0, 1.25);
-  const brakeWeightTransfer = input.brake > 0.06 && absSteerIn > 0.22 && vForward > 10 ? 0.52 : 0;
-  const holdBuild = Math.min(0.46, car.steerHoldTime * 0.72);
+  // Responsive Brake-Initiated + Natural Corner-Drift Model:
+  // 1) Applying Brake + Steering at >= 21 km/h IMMEDIATELY kicks the rear out into a wide controllable drift!
+  // 2) Getting back on Gas while steering sustains the powerslide smoothly through the apex!
+  // 3) Hard high-speed cornering also naturally steps the rear out!
+  const minCornerDriftSpeed = isDirtTrack ? 9.5 : 12.0;
+  const speedDriftFactor = THREE.MathUtils.clamp((absSpeed - minCornerDriftSpeed) / 18, 0, 1.25);
+  const brakeDriftSpeedFactor = THREE.MathUtils.clamp((vForward - 5.2) / 10.5, 0.35, 1.0);
+  const brakeWeightTransfer = isBrakeDrifting
+    ? (0.78 + absSteerIn * 0.68) * brakeDriftSpeedFactor
+    : 0;
+  const holdBuild = Math.min(0.48, car.steerHoldTime * 0.78);
   const cornerDemand =
-    !car.airborne && vForward > minDriftSpeed * 0.85
-      ? (absSteerIn * (0.62 + holdBuild) * speedDriftFactor + brakeWeightTransfer) * trackDriftEase
+    !car.airborne && vForward > 5.5
+      ? (absSteerIn * (0.64 + holdBuild) * speedDriftFactor + brakeWeightTransfer) * trackDriftEase
       : 0;
   const isCounterSteering =
-    absSteerIn > 0.15 && Math.abs(vLateral) > 2.2 && Math.sign(input.steer) === Math.sign(vLateral);
-  const rawDriftEngage =
-    cornerDemand > 0.44
-      ? THREE.MathUtils.clamp((cornerDemand - 0.36) * 1.15, 0, 1)
-      : isCounterSteering && Math.abs(vLateral) > 3.2
-      ? THREE.MathUtils.clamp(car.driftState * 0.88, 0, 0.72)
-      : 0;
+    absSteerIn > 0.14 && Math.abs(vLateral) > 1.8 && Math.sign(input.steer) === Math.sign(vLateral);
+  // Sustain an active drift cleanly on throttle after releasing brake until the player straightens out!
+  const sustainThrottleSlide =
+    !car.airborne &&
+    car.driftState > 0.28 &&
+    absSteerIn > 0.18 &&
+    vForward > 7.2 &&
+    input.throttle > 0.2;
+  const rawDriftEngage = isBrakeDrifting
+    ? THREE.MathUtils.clamp(0.68 + absSteerIn * 0.32 * brakeDriftSpeedFactor, 0.55, 1.0)
+    : cornerDemand > 0.42
+    ? THREE.MathUtils.clamp((cornerDemand - 0.34) * 1.18, 0, 1)
+    : sustainThrottleSlide
+    ? THREE.MathUtils.clamp(Math.max(car.driftState * 0.94, 0.48 + absSteerIn * 0.38), 0.45, 0.92)
+    : isCounterSteering && Math.abs(vLateral) > 2.4
+    ? THREE.MathUtils.clamp(car.driftState * 0.9, 0, 0.78)
+    : 0;
 
   const prevDriftState = car.driftState;
   car.driftState = THREE.MathUtils.damp(
     car.driftState,
     rawDriftEngage,
-    rawDriftEngage > car.driftState ? 7.5 : 4.8,
+    rawDriftEngage > car.driftState ? (isBrakeDrifting ? 13.5 : 8.5) : 4.2,
     dt
   );
 
@@ -848,54 +885,60 @@ export function stepCarPhysics(
     car.nitroEnergy = Math.min(100, car.nitroEnergy + 8);
   }
 
-  // Rear lateral grip softens smoothly during active corner drifts so the tail steps out cleanly
-  const driftGripFloor = isDirtTrack ? 0.44 : 0.54;
+  // Rear lateral grip drops decisively during Brake+Steer & corner drifts so the tail truly swings wide!
+  const driftGripFloor = isBrakeDrifting ? 0.24 : isDirtTrack ? 0.32 : 0.38;
   const effectiveLatGrip = totalGrip * THREE.MathUtils.lerp(1.0, driftGripFloor, car.driftState);
 
-  // Slight realistic corner scrubbing drag while drifting hard (keeps braking/apex line challenging!)
-  if (car.driftState > 0.2 && !car.airborne) {
-    longAccel -= car.driftState * (isDirtTrack ? 2.1 : 1.65) * (0.4 + 0.6 * highSpeedFactor);
+  // Light realistic corner scrubbing drag while drifting hard (skipped during brake-drift so brake isn't doubled)
+  if (car.driftState > 0.2 && !isBrakeDrifting && !car.airborne) {
+    longAccel -= car.driftState * (isDirtTrack ? 1.6 : 1.25) * (0.4 + 0.6 * highSpeedFactor);
   }
 
-  // Bicycle yaw rate + smooth automatic apex-bite oversteer during corner drifts
+  // Bicycle yaw rate + decisive brake-drift & corner-drift oversteer rotation
   const airControlMult = car.airborne ? 0.18 : 1.0;
   const kinematicYaw = absSpeed > 0.35 ? (vForward / spec.wheelbase) * Math.tan(car.steerAngle) * airControlMult : 0;
   const autoDriftYaw =
-    !car.airborne && car.driftState > 0.12 && vForward > 9
-      ? -input.steer * (isDirtTrack ? 0.56 : 0.44) * car.driftState * Math.min(1, absSpeed / 22)
+    !car.airborne && car.driftState > 0.1 && vForward > 5.5
+      ? -input.steer * (isDirtTrack ? 0.74 : 0.62) * car.driftState * Math.min(1, absSpeed / 16)
       : 0;
+  const brakeDriftKickYaw = isBrakeDrifting
+    ? -input.steer * 0.52 * Math.min(1, vForward / 13)
+    : 0;
   // Counter-steer stabilization: steering into the slide arrests spin smoothly and extends the drift arc
-  const counterStabilize = isCounterSteering ? -car.yawRate * 0.45 : 0;
-  const maxYawForSpeed = Math.min(1.85, (39 * totalGrip) / Math.max(10, absSpeed));
-  const rawYaw = (kinematicYaw + autoDriftYaw + counterStabilize) * (0.78 + 0.22 * surfaceGrip);
+  const counterStabilize = isCounterSteering ? -car.yawRate * 0.42 : 0;
+  const maxYawCap = THREE.MathUtils.lerp(1.88, 2.38, car.driftState);
+  const maxYawForSpeed = Math.min(maxYawCap, (44 * totalGrip) / Math.max(9, absSpeed));
+  const rawYaw = (kinematicYaw + autoDriftYaw + brakeDriftKickYaw + counterStabilize) * (0.78 + 0.22 * surfaceGrip);
   const targetYawRate = THREE.MathUtils.clamp(rawYaw, -maxYawForSpeed, maxYawForSpeed);
   const yawResponse = car.airborne
     ? 2.4
-    : THREE.MathUtils.lerp(THREE.MathUtils.lerp(9.6, 7.2, highSpeedFactor), 5.6, car.driftState);
+    : isBrakeDrifting
+    ? 8.8
+    : THREE.MathUtils.lerp(THREE.MathUtils.lerp(9.6, 7.2, highSpeedFactor), 6.2, car.driftState);
   car.yawRate = THREE.MathUtils.damp(car.yawRate, targetYawRate, yawResponse, dt);
   if (absSteerIn < 0.01 && Math.abs(car.yawRate) < 0.001) {
     car.yawRate = 0;
   }
 
-  // Integrate forward speed cleanly (prevent braking from ever crossing 0 into reverse/forward creep)
+  // Integrate forward speed cleanly (prevent straight-line mobile brake from crossing 0 into reverse creep)
   const hardTopSpeedMs = baseTopSpeedMs * 1.19;
   const prevVForward = vForward;
   vForward += longAccel * dt;
-  if (isPureBrake && (prevVForward * vForward <= 0 || Math.abs(vForward) < 0.08)) {
+  if (isPureBrake && !isBrakeDrifting && (prevVForward * vForward <= 0 || Math.abs(vForward) < 0.08)) {
     vForward = 0;
   }
   vForward = THREE.MathUtils.clamp(vForward, -MAX_REVERSE_SPEED_MS, hardTopSpeedMs);
 
-  // Centrifugal lateral slip builds naturally during active corner drifts (tight & planted on straights!)
+  // Centrifugal lateral slip builds boldly during Brake+Steer & corner drifts (planted on straights!)
   const baseSlipGain = THREE.MathUtils.lerp(0.22, 0.14, highSpeedFactor);
-  const driftSlipGain = isDirtTrack ? 0.72 : 0.62;
+  const driftSlipGain = isBrakeDrifting ? 1.18 : isDirtTrack ? 0.98 : 0.88;
   const lateralSlipGain = THREE.MathUtils.lerp(baseSlipGain, driftSlipGain, car.driftState);
   vLateral -= vForward * car.yawRate * dt * lateralSlipGain;
 
-  // Anti-overshoot Pacejka lateral tire grip
-  const slipRatio = vLateral / Math.max(8, absSpeed);
+  // Anti-overshoot Pacejka lateral tire grip (relaxes during active drift so the car holds wide sideways slides!)
+  const slipRatio = vLateral / Math.max(7, absSpeed);
   const pacejka = Math.sin(1.4 * Math.atan(4.0 * slipRatio));
-  const maxLatAccel = 22.0 * effectiveLatGrip;
+  const maxLatAccel = THREE.MathUtils.lerp(22.0, 10.5, car.driftState) * effectiveLatGrip;
   const latDelta = -pacejka * maxLatAccel * dt;
   if (Math.abs(latDelta) >= Math.abs(vLateral)) {
     vLateral = 0;
@@ -905,28 +948,32 @@ export function stepCarPhysics(
 
   // Lateral settling: holds wide glorious powerslides while drifting, snaps straight when exiting!
   const straightDamp = (6.4 + highSpeedFactor * 2.2) * effectiveLatGrip;
-  const driftDamp = (isDirtTrack ? 1.55 : 1.85) * effectiveLatGrip;
-  const latDamp = absSpeed < 4 ? 14 : THREE.MathUtils.lerp(straightDamp, driftDamp, car.driftState);
+  const driftDamp = (isBrakeDrifting ? 0.72 : isDirtTrack ? 0.92 : 1.08) * effectiveLatGrip;
+  const latDamp = absSpeed < 3.5 ? 14 : THREE.MathUtils.lerp(straightDamp, driftDamp, car.driftState);
   vLateral *= Math.exp(-latDamp * dt);
   if (Math.abs(vLateral) < 0.03) vLateral = 0;
 
   // Drift intensity telemetry, expressive visual slip yaw angle & live Drift Points scoring!
-  const slipMag = Math.abs(vLateral) / Math.max(7.5, absSpeed);
-  const slipDrift = absSpeed > 9 && !car.airborne ? THREE.MathUtils.clamp((slipMag - 0.055) * 4.2, 0, 1) : 0;
-  const rawDrift = !car.airborne ? Math.max(slipDrift, car.driftState * (absSteerIn > 0.2 ? 0.78 : 0.4)) : 0;
-  car.driftIntensity = THREE.MathUtils.damp(car.driftIntensity, rawDrift, 10, dt);
+  const slipMag = Math.abs(vLateral) / Math.max(6.2, absSpeed);
+  const slipDrift = absSpeed > 5.8 && !car.airborne ? THREE.MathUtils.clamp((slipMag - 0.045) * 4.4, 0, 1) : 0;
+  const rawDrift = !car.airborne
+    ? Math.max(slipDrift, car.driftState * (isBrakeDrifting ? 0.95 : absSteerIn > 0.16 ? 0.82 : 0.42))
+    : 0;
+  car.driftIntensity = THREE.MathUtils.damp(car.driftIntensity, rawDrift, 11.5, dt);
 
+  const visualLatSlip = Math.atan2(vLateral, Math.max(7.2, absSpeed));
+  const brakeVisualBias = isBrakeDrifting ? -input.steer * 0.14 * car.driftState : 0;
   const targetDriftAngle =
-    !car.airborne && absSpeed > 8
-      ? THREE.MathUtils.clamp(-Math.atan2(vLateral, Math.max(9.5, absSpeed)) * 1.48, -0.44, 0.44)
+    !car.airborne && absSpeed > 5.5
+      ? THREE.MathUtils.clamp(-visualLatSlip * 1.58 + brakeVisualBias, -0.58, 0.58)
       : 0;
-  car.driftAngle = THREE.MathUtils.damp(car.driftAngle, targetDriftAngle, 8.5, dt);
+  car.driftAngle = THREE.MathUtils.damp(car.driftAngle, targetDriftAngle, 10.5, dt);
 
   // Accumulate drift points automatically while powersliding around corners on ANY track!
   const isActivelyDrifting =
     !car.airborne &&
-    car.driftIntensity > 0.22 &&
-    absSpeed > 10 &&
+    car.driftIntensity > 0.18 &&
+    absSpeed > 6.5 &&
     car.surface !== 'offtrack';
 
   if (isActivelyDrifting) {
@@ -1056,6 +1103,15 @@ export function stepCarPhysics(
 
       const hSin = Math.sin(car.heading);
       const hCos = Math.cos(car.heading);
+      // Cap excessive backward recoil so frontal solid hits don't fling the car uncontrollably backward
+      const postFwd = car.vx * hSin + car.vz * hCos;
+      if (postFwd < -3.2 && car.gear >= 1) {
+        const postLat = car.vx * hCos - car.vz * hSin;
+        const clampedFwd = -3.2;
+        car.vx = clampedFwd * hSin + postLat * hCos;
+        car.vz = clampedFwd * hCos - postLat * hSin;
+      }
+
       const sideLever = nx * hCos - nz * hSin;
       const hitNorm = Math.min(1, 0.3 + closing / 13.5);
       if (closing > 0.5) {
@@ -1076,20 +1132,29 @@ export function stepCarPhysics(
     const hitSpeed = Math.hypot(car.vx, car.vz);
     knockBreakableProp(prop, car.vx, car.vz, car.x, car.z);
 
+    const isTree = prop.kind === 'tree';
     const isHeavy = prop.kind === 'pole' || prop.kind === 'fence';
-    const speedKeep = isHeavy
+    const isMedium = prop.kind === 'bench';
+    const speedKeep = isTree
+      ? THREE.MathUtils.clamp(0.88 - hitSpeed * 0.0014, 0.80, 0.88)
+      : isHeavy
       ? THREE.MathUtils.clamp(0.95 - hitSpeed * 0.0009, 0.89, 0.95)
-      : 0.968;
+      : isMedium
+      ? 0.945
+      : 0.972;
     car.vx *= speedKeep;
     car.vz *= speedKeep;
 
     const hSin = Math.sin(car.heading);
     const hCos = Math.cos(car.heading);
     const sideLever = nx * hCos - nz * hSin;
-    const hitNorm = Math.min(0.82, (isHeavy ? 0.34 : 0.24) + hitSpeed / 48);
+    const hitNorm = Math.min(
+      0.88,
+      (isTree ? 0.52 : isHeavy ? 0.34 : isMedium ? 0.3 : 0.22) + hitSpeed / 46
+    );
     barrierImpact = Math.max(barrierImpact, hitNorm);
-    car.roll = THREE.MathUtils.clamp(car.roll + sideLever * hitNorm * 0.075, -0.12, 0.12);
-    car.pitch = THREE.MathUtils.clamp(car.pitch - hitNorm * 0.045, -0.07, 0.07);
+    car.roll = THREE.MathUtils.clamp(car.roll + sideLever * hitNorm * 0.08, -0.13, 0.13);
+    car.pitch = THREE.MathUtils.clamp(car.pitch - hitNorm * 0.05, -0.08, 0.08);
     car.speed = car.vx * hSin + car.vz * hCos;
   };
 

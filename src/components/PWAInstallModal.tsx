@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { useOnlineStatus, usePWAInstall } from '../hooks/usePWAInstall.ts';
 
-const GAME_ICON_SRC = '/assets/aistudio/ICON_49f818b7.jpeg';
+const GAME_ICON_SRC = `${import.meta.env.BASE_URL}assets/aistudio/ICON_49f818b7.jpeg`;
 
 interface PWAInstallModalProps {
   open: boolean;
@@ -29,7 +29,8 @@ export function PWAInstallModal({ open, onClose }: PWAInstallModalProps) {
   const [showQrOnMobile, setShowQrOnMobile] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
 
-  const appUrl = typeof window !== 'undefined' ? window.location.origin : '';
+  const appUrl =
+    typeof window !== 'undefined' ? new URL('./', window.location.href).href : '';
   const isMobileBrowser = isAndroid || isIOS;
 
   useEffect(() => {
