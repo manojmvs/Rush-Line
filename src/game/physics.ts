@@ -369,7 +369,8 @@ export function stepCarPhysics(
   boxColliders: TrackBoxCollider[] = [],
   breakables: BreakableProp[] = [],
   getGroundY?: (x: number, z: number) => number,
-  weatherGripMult = 1.0
+  weatherGripMult = 1.0,
+  paceMultiplier = 1.0
 ): {
   barrierImpact: number;
   completedLap: boolean;
@@ -389,7 +390,8 @@ export function stepCarPhysics(
   const suspRollFactor =
     car.config.suspension === 'stiff' ? 0.62 : car.config.suspension === 'balanced' ? 0.92 : 1.22;
 
-  const baseTopSpeedMs = stats.topSpeedKmh / 3.6;
+  const safePace = THREE.MathUtils.clamp(paceMultiplier, 0.85, 1.28);
+  const baseTopSpeedMs = (stats.topSpeedKmh / 3.6) * safePace;
 
   const sinH = Math.sin(car.heading);
   const cosH = Math.cos(car.heading);
@@ -657,7 +659,7 @@ export function stepCarPhysics(
   const rollingRes = vForward * surfaceDrag * 3.8;
   const naturalResist = aeroDrag + rollingRes;
 
-  const baseDriveAccel = (spec.basePowerKw * engineMult * 15.5) / spec.massKg;
+  const baseDriveAccel = ((spec.basePowerKw * engineMult * 15.5) / spec.massKg) * (0.45 + 0.55 * safePace);
   let longAccel = 0;
 
   const absSteerIn = Math.abs(input.steer);
@@ -844,7 +846,8 @@ export function stepCarPhysics(
 
   // Dynamic downforce grip scales with speed^2 (plants the chassis on straightaways)
   const downforceBonus = 1 + 0.00028 * aeroDownforce * vForward * vForward;
-  const totalGrip = spec.baseGrip * tireGripMult * surfaceGrip * downforceBonus;
+  const paceGripBonus = safePace > 1.0 ? 1 + Math.min(0.14, (safePace - 1.0) * 0.65) : 1.0;
+  const totalGrip = spec.baseGrip * tireGripMult * surfaceGrip * downforceBonus * paceGripBonus;
 
   // Correct counter-steer detection:
   // Right turn (steer > 0) -> yawRate < 0 -> vLateral > 0 (sliding outward left).
@@ -1387,7 +1390,7 @@ export function stepCarPhysics(
 
   let baseRoadSurfaceY = roadDeckY;
   const skirtOuterEdge = postBarrierOffset + 0.72;
-  const embOuterEdge = postBarrierOffset + 4.4;
+  const embOuterEdge = postBarrierOffset + 7.5;
   if (trackId !== 'city-track' && getGroundY) {
     if (absPostLat <= skirtOuterEdge) {
       baseRoadSurfaceY = Math.max(roadDeckY, terrainFloorY);
@@ -1726,41 +1729,173 @@ export function resolveCarCollisions(
   return { maxImpact, playerImpact, impactX, impactY, impactZ };
 }
 
+/**
+ * Real aerodynamic slipstream / drafting multiplier (works for BOTH player and AI cars!).
+ * Trailing closely behind a rival at racing speed cuts air resistance and builds a slingshot pass surge.
+ */
+export function computeSlipstreamFactor(car: PhysicsCar, allCars: PhysicsCar[]): number {
+  if (car.eliminated || car.airborne || car.speed < 20) return 1.0;
+  const sinH = Math.sin(car.heading);
+  const cosH = Math.cos(car.heading);
+  let bestDraft = 0;
+
+  for (let i = 0; i < allCars.length; i++) {
+    const other = allCars[i];
+    if (other.id === car.id || other.eliminated) continue;
+    const dx = other.x - car.x;
+    const dz = other.z - car.z;
+    const distSq = dx * dx + dz * dz;
+    if (distSq < 12 || distSq > 784) continue; // 3.5m .. 28m ahead
+
+    const fwd = dx * sinH + dz * cosH;
+    if (fwd < 3.5 || fwd > 28) continue;
+    const lat = Math.abs(dx * cosH - dz * sinH);
+    if (lat > 2.65) continue;
+
+    const fwdFactor = 1 - Math.abs(fwd - 11.5) / 17.5;
+    const latFactor = 1 - lat / 2.65;
+    const draft = Math.max(0, fwdFactor) * latFactor;
+    if (draft > bestDraft) bestDraft = draft;
+  }
+
+  return 1.0 + bestDraft * 0.072;
+}
+
+export interface AiDriveDecision {
+  input: CarInput;
+  paceMultiplier: number;
+  targetLane: number;
+}
+
 export function computeAiInput(
   car: PhysicsCar,
   samples: SplineSample[],
-  skill: number, // 0.88 .. 1.04
+  skill: number, // 0.93 .. 1.08
   preferredLane: number,
+  currentLane: number,
   diversions: TrackDiversion[] = [],
-  playerProgress?: number,
-  trackId?: TrackId
-): CarInput {
+  playerCar?: PhysicsCar,
+  allCars: PhysicsCar[] = [],
+  trackId?: TrackId,
+  roadWidth = 16,
+  totalLaps = 3,
+  isLastManStanding = false,
+  raceElapsedMs = 0
+): AiDriveDecision {
   const n = samples.length;
-  const lookAhead = Math.round(10 + Math.min(18, Math.abs(car.speed) * 0.27));
+  const absSpeed = Math.abs(car.speed);
+  const carStats = computeVehicleStats(car.config);
+  const carTopMs = carStats.topSpeedKmh / 3.6;
+
+  // Dynamic speed-matched lookahead: tighter in hairpins so AI hugs apexes cleanly, longer on fast straights
+  const isTightTrack = trackId === 'gokart-track' || trackId === 'city-track';
+  const lookAhead = Math.round(
+    (isTightTrack ? 7 : 9) + Math.min(isTightTrack ? 12 : 16, absSpeed * (isTightTrack ? 0.21 : 0.25))
+  );
   const targetIdx = (car.sampleIndex + lookAhead) % n;
   const targetSample = samples[targetIdx];
-  const cornerSample = samples[(car.sampleIndex + lookAhead + 11) % n];
+  const nearAheadSample = samples[(car.sampleIndex + Math.max(5, Math.round(lookAhead * 0.65))) % n];
+  const midAheadSample = samples[(car.sampleIndex + lookAhead + 7) % n];
+  const farAheadSample = samples[(car.sampleIndex + lookAhead + 14) % n];
 
-  // Smartly choose a clean Left or Right split lane & stay cleanly inside Italian street borders & poles!
-  let laneOffset = preferredLane;
+  const nearCurv = Math.max(samples[car.sampleIndex].curvature, nearAheadSample.curvature, targetSample.curvature);
+  const farCurv = Math.max(midAheadSample.curvature, farAheadSample.curvature);
+  const effectiveCurv = Math.max(nearCurv, farCurv * 0.86);
+
+  // Safe drivable road half-width (respects City narrow alleys & Go-Kart tire fences)
+  let safeHalfWidth = roadWidth * 0.5 - 1.55;
   if (trackId === 'city-track') {
     const cityTight = getCityStreetTightness(targetIdx, n);
-    const maxSafeCityLane = 5.4 - cityTight * 2.75;
-    laneOffset = THREE.MathUtils.clamp(preferredLane * (1 - cityTight * 0.45), -maxSafeCityLane, maxSafeCityLane);
+    safeHalfWidth = Math.max(2.35, roadWidth * 0.5 - cityTight * 2.85 - 1.35);
   }
+
+  // 1. Dynamic Apex-Seeking Racing Line (dives smoothly to the inside kerb on corners!)
+  const sCurr = samples[car.sampleIndex];
+  const sCorner = samples[(car.sampleIndex + Math.min(18, lookAhead + 4)) % n];
+  // Positive dot with sCurr.right => track bends RIGHT (+s.right); negative => track bends LEFT (-s.right)
+  const turnDotRight = sCurr.right.x * sCorner.tangent.x + sCurr.right.z * sCorner.tangent.z;
+  let desiredLane = THREE.MathUtils.clamp(preferredLane, -safeHalfWidth, safeHalfWidth);
+
+  if (effectiveCurv > 0.14 && Math.abs(turnDotRight) > 0.04) {
+    const insideSign = turnDotRight > 0 ? 1 : -1;
+    const apexIntensity = THREE.MathUtils.clamp((effectiveCurv - 0.12) / 0.45, 0, 1);
+    const apexLane = insideSign * (safeHalfWidth * 0.82);
+    desiredLane = THREE.MathUtils.lerp(desiredLane, apexLane, apexIntensity * 0.82);
+  }
+
+  // 2. Active Wheel-to-Wheel Overtaking & Traffic Avoidance
+  if (allCars.length > 1) {
+    const sinH = Math.sin(car.heading);
+    const cosH = Math.cos(car.heading);
+    let nearestBlockerFwd = Infinity;
+    let blockerLatOffset = 0;
+    let sidePressure = 0;
+
+    for (let i = 0; i < allCars.length; i++) {
+      const other = allCars[i];
+      if (other.id === car.id || other.eliminated) continue;
+      const dx = other.x - car.x;
+      const dz = other.z - car.z;
+      const distSq = dx * dx + dz * dz;
+      if (distSq > 784) continue; // > 28m
+
+      const fwd = dx * sinH + dz * cosH;
+      const relLat = dx * cosH - dz * sinH; // + = other car is to our left in car frame
+
+      // Car blocking ahead in our path: actively duck out to overtake!
+      if (fwd > 2.2 && fwd < 26 && Math.abs(relLat) < 2.65) {
+        if (fwd < nearestBlockerFwd) {
+          nearestBlockerFwd = fwd;
+          blockerLatOffset = other.lateralOffset;
+        }
+      } else if (fwd >= -3.5 && fwd <= 4.2 && Math.abs(relLat) < 2.75) {
+        // Door-to-door side-by-side battle: hold tight competitive spacing without tangling
+        const pushAway = car.lateralOffset >= other.lateralOffset ? 1 : -1;
+        sidePressure += pushAway * (2.75 - Math.abs(relLat)) * 0.72;
+      }
+    }
+
+    if (nearestBlockerFwd < Infinity) {
+      // Pick whichever passing lane (left or right of blocker) has more clean asphalt room!
+      const spaceRight = safeHalfWidth - blockerLatOffset;
+      const spaceLeft = blockerLatOffset + safeHalfWidth;
+      const passSign = spaceRight >= spaceLeft ? 1 : -1;
+      const passLane = THREE.MathUtils.clamp(
+        blockerLatOffset + passSign * 3.15,
+        -safeHalfWidth,
+        safeHalfWidth
+      );
+      const urgency = THREE.MathUtils.clamp(1.2 - nearestBlockerFwd / 26, 0.45, 1.0);
+      desiredLane = THREE.MathUtils.lerp(desiredLane, passLane, urgency);
+    }
+
+    if (Math.abs(sidePressure) > 0.05) {
+      desiredLane = THREE.MathUtils.clamp(desiredLane + sidePressure, -safeHalfWidth, safeHalfWidth);
+    }
+  }
+
+  // 3. Respect Split-Route Diversions (cleanly pick Left or Right bypass branch around center island)
   for (let i = 0; i < diversions.length; i++) {
     const d = diversions[i];
     const inApproach = targetIdx >= d.startIdx - 14 && targetIdx <= d.endIdx + 4;
     if (inApproach) {
-      const branchSign = preferredLane < 0 ? -1 : 1;
+      const branchSign = currentLane < d.centerOffset ? -1 : 1;
       const safeLane = d.islandHalfWidth + 3.45;
-      laneOffset = d.centerOffset + branchSign * safeLane;
+      desiredLane = d.centerOffset + branchSign * safeLane;
       break;
     }
   }
 
-  const tx = targetSample.pos.x + targetSample.right.x * laneOffset;
-  const tz = targetSample.pos.z + targetSample.right.z * laneOffset;
+  // Off-track recovery: pull straight back onto clean asphalt immediately if bumped wide
+  if (Math.abs(car.lateralOffset) > safeHalfWidth + 1.4 || (raceElapsedMs > 2400 && absSpeed < 7.5)) {
+    desiredLane = THREE.MathUtils.clamp(desiredLane, -safeHalfWidth * 0.55, safeHalfWidth * 0.55);
+  }
+
+  // Use smoothly damped lane so overtakes and apex cuts look silky and realistic
+  const activeLane = THREE.MathUtils.lerp(currentLane, desiredLane, 0.35);
+
+  const tx = targetSample.pos.x + targetSample.right.x * activeLane;
+  const tz = targetSample.pos.z + targetSample.right.z * activeLane;
 
   const dx = tx - car.x;
   const dz = tz - car.z;
@@ -1769,34 +1904,85 @@ export function computeAiInput(
   while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
   while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
 
-  const steer = THREE.MathUtils.clamp(-angleDiff * 2.55, -1, 1);
+  const steerGain = isTightTrack ? 3.25 : 2.95;
+  const steer = THREE.MathUtils.clamp(-angleDiff * steerGain, -1, 1);
 
-  const upcomingCurv = Math.max(targetSample.curvature, cornerSample.curvature);
+  // 4. Dynamic Competitive Pace & Anti-Blowout Tension (keeps battles thrilling start-to-finish!)
+  let paceMultiplier = THREE.MathUtils.clamp(0.95 + (skill - 0.94) * 0.9, 0.94, 1.09);
+  let gap = 0;
 
-  // Subtle fair competitive pacing keeps wheel-to-wheel battles intense without feeling unfair
-  let paceAdjust = 1.0;
-  if (typeof playerProgress === 'number') {
-    const gap = car.totalProgress - playerProgress;
-    if (gap < -0.05) {
-      paceAdjust = 1.06; // AI pushes harder to catch back up into battle
-    } else if (gap > 0.14) {
-      paceAdjust = 0.96; // Leader stays slightly reachable if player drives clean drifts
+  if (playerCar) {
+    const playerStats = computeVehicleStats(playerCar.config);
+    const playerTopMs = playerStats.topSpeedKmh / 3.6;
+    // Ensure AI rivals match player's garage upgrades so fast player cars still face fierce competition!
+    const speedParity = THREE.MathUtils.clamp(playerTopMs / Math.max(36, carTopMs), 0.96, 1.15);
+    paceMultiplier *= speedParity;
+
+    gap = car.totalProgress - playerCar.totalProgress;
+    const isFinalLap = car.lap >= totalLaps || playerCar.lap >= totalLaps;
+    const contenderWeight = THREE.MathUtils.clamp((skill - 0.91) / 0.14, 0.35, 1.15);
+
+    if (gap < -0.008) {
+      // Behind player: relentlessly hunt down the player's bumper & close gaps so every mistake hurts!
+      const deficit = Math.min(0.22, -gap);
+      const catchBoost = (0.045 + deficit * 0.72) * contenderWeight;
+      const finalLapSurge = isFinalLap ? 0.04 : 0;
+      paceMultiplier *= 1.0 + Math.min(0.20, catchBoost + finalLapSurge);
+    } else if (gap <= 0.045) {
+      // Neck-and-neck / battling right ahead of player: stay fiercely competitive so overtaking feels earned!
+      const duelBoost = (0.018 + (isFinalLap ? 0.025 : 0)) * contenderWeight;
+      paceMultiplier *= 1.0 + duelBoost;
+    } else if (gap > 0.065) {
+      // Gently cap runaway leads so a single player mistake still allows a dramatic, sweaty comeback!
+      const excess = Math.min(0.16, gap - 0.065);
+      const easeFactor = isLastManStanding ? 0.38 : 0.48;
+      paceMultiplier *= Math.max(0.92, 1.0 - excess * easeFactor);
     }
   }
 
-  // Competitive, challenging race pace that rewards clean drifting, jumps & Nitro timing!
-  const desiredSpeed = THREE.MathUtils.clamp((58 - upcomingCurv * 64) * skill * paceAdjust, 20, 62);
+  paceMultiplier = THREE.MathUtils.clamp(paceMultiplier, 0.90, 1.24);
 
-  let throttle = 0;
+  // 5. Realistic High-Speed Cornering Curve (NO MORE 72 km/h braking on medium bends!)
+  const effectiveTopMs = carTopMs * paceMultiplier;
+  let cornerSpeedRatio = 1.16; // Flat-out on straights & gentle sweepers (effectiveCurv <= 0.22)
+  if (effectiveCurv > 0.22) {
+    // Smooth high-speed curve:
+    // curv 0.35 -> ~96% top speed | curv 0.55 -> ~82% top speed | curv 0.85 -> ~67% top speed | curv 1.20 -> ~56%
+    const t = THREE.MathUtils.clamp((effectiveCurv - 0.22) / 0.98, 0, 1);
+    const minCornerFrac = isTightTrack ? 0.54 : 0.60;
+    cornerSpeedRatio = THREE.MathUtils.lerp(1.04, minCornerFrac, Math.pow(t, 0.85));
+  }
+  const desiredSpeed = Math.max(25, effectiveTopMs * cornerSpeedRatio);
+
+  let throttle = 1.0;
   let brake = 0;
   if (car.speed < desiredSpeed) {
-    throttle = THREE.MathUtils.clamp((desiredSpeed - car.speed) * 0.2 + 0.45, 0.45, 1);
+    // Stay flat-out all the way up to desired corner speed — zero lazy coasting!
+    throttle = 1.0;
   } else if (car.speed > desiredSpeed + 3.2) {
-    brake = THREE.MathUtils.clamp((car.speed - desiredSpeed) * 0.095, 0.14, 0.85);
+    // Crisp trail-braking ONLY when genuinely entering a sharp hairpin too hot
+    const overSpeed = car.speed - desiredSpeed;
+    brake = THREE.MathUtils.clamp(overSpeed * 0.085, 0.16, 0.78);
+    // Keep partial throttle if trail-braking through a drift corner so exit launch is instant!
+    throttle = Math.abs(steer) > 0.32 ? 0.35 : 0.0;
   } else {
-    throttle = 0.4;
+    throttle = 0.88;
   }
 
-  const nitro = upcomingCurv < 0.065 && car.speed > 30 && car.nitroEnergy > 38 && skill > 0.88;
-  return { throttle, brake, steer, handbrake: false, nitro };
+  // 6. Aggressive Tactical Nitro (straights, corner-exit launches, overtakes & final-lap sprints!)
+  const alignedForBoost = nearCurv < 0.24 && Math.abs(angleDiff) < 0.20 && car.speed > 18;
+  const inCloseDuel = playerCar ? Math.abs(gap) < 0.05 : false;
+  const chasingPlayer = playerCar ? gap < 0.008 : false;
+  const isFinalLapSprint = car.lap >= totalLaps;
+  const wantsExitBurst = car.speed < effectiveTopMs * 0.84 && car.nitroEnergy > 36;
+  const wantsDuelBurst = (chasingPlayer || inCloseDuel || isFinalLapSprint) && car.nitroEnergy > 22;
+  const wantsStraightBurst = effectiveCurv < 0.12 && car.nitroEnergy > 45;
+
+  const nitro = alignedForBoost && (wantsDuelBurst || wantsExitBurst || wantsStraightBurst);
+
+  return {
+    input: { throttle, brake, steer, handbrake: false, nitro },
+    paceMultiplier,
+    targetLane: desiredLane,
+  };
 }

@@ -5,6 +5,7 @@ import { buildTrackScene, stepBreakables } from '../game/tracks.ts';
 import { buildVehicleMesh, type CarMeshRig } from '../game/carMesh.ts';
 import {
   computeAiInput,
+  computeSlipstreamFactor,
   createPhysicsCar,
   resolveCarCollisions,
   stepCarPhysics,
@@ -86,6 +87,7 @@ interface AiRival {
   rig: CarMeshRig;
   skill: number;
   preferredLane: number;
+  currentLane: number;
 }
 
 interface PeerCar {
@@ -109,20 +111,20 @@ const AI_ROSTER: Array<{
   skill: number;
   engineLevel: number;
 }> = [
-  { name: 'K. Takahashi', chassisId: 'hyperion-proto', color: '#E2E8F0', accent: '#EF4444', skill: 1.03, engineLevel: 5 },
-  { name: 'L. Bellini', chassisId: 'stratos-gt3', color: '#2563EB', accent: '#F59E0B', skill: 1.00, engineLevel: 4 },
-  { name: 'M. Lindqvist', chassisId: 'veloce-v12', color: '#F59E0B', accent: '#0F172A', skill: 0.98, engineLevel: 4 },
-  { name: 'R. Alvarez', chassisId: 'vanguard-v8', color: '#15803D', accent: '#F8FAFC', skill: 0.96, engineLevel: 4 },
-  { name: 'S. Moreau', chassisId: 'drift-s15', color: '#0EA5E9', accent: '#F8FAFC', skill: 0.94, engineLevel: 3 },
-  { name: 'A. Conti', chassisId: 'apex-gtr', color: '#EF4444', accent: '#FFFFFF', skill: 0.93, engineLevel: 4 },
-  { name: 'D. Novak', chassisId: 'stratos-gt3', color: '#7C3AED', accent: '#FDE047', skill: 0.92, engineLevel: 3 },
-  { name: 'H. Sato', chassisId: 'drift-s15', color: '#F97316', accent: '#0F172A', skill: 0.91, engineLevel: 3 },
-  { name: 'C. Vance', chassisId: 'vanguard-v8', color: '#14B8A6', accent: '#F8FAFC', skill: 0.90, engineLevel: 3 },
-  { name: 'E. Rossi', chassisId: 'veloce-v12', color: '#EC4899', accent: '#FFFFFF', skill: 0.89, engineLevel: 3 },
-  { name: 'N. Petrov', chassisId: 'hyperion-proto', color: '#84CC16', accent: '#0F172A', skill: 0.88, engineLevel: 3 },
-  { name: 'J. Morales', chassisId: 'apex-gtr', color: '#0284C7', accent: '#FACC15', skill: 0.87, engineLevel: 2 },
-  { name: 'T. Weber', chassisId: 'vanguard-v8', color: '#B91C1C', accent: '#E2E8F0', skill: 0.86, engineLevel: 2 },
-  { name: 'P. Laurent', chassisId: 'drift-s15', color: '#EAB308', accent: '#1E293B', skill: 0.85, engineLevel: 2 },
+  { name: 'K. Takahashi', chassisId: 'hyperion-proto', color: '#E2E8F0', accent: '#EF4444', skill: 1.07, engineLevel: 5 },
+  { name: 'L. Bellini', chassisId: 'stratos-gt3', color: '#2563EB', accent: '#F59E0B', skill: 1.05, engineLevel: 5 },
+  { name: 'M. Lindqvist', chassisId: 'veloce-v12', color: '#F59E0B', accent: '#0F172A', skill: 1.03, engineLevel: 5 },
+  { name: 'R. Alvarez', chassisId: 'vanguard-v8', color: '#15803D', accent: '#F8FAFC', skill: 1.01, engineLevel: 4 },
+  { name: 'S. Moreau', chassisId: 'drift-s15', color: '#0EA5E9', accent: '#F8FAFC', skill: 0.99, engineLevel: 4 },
+  { name: 'A. Conti', chassisId: 'apex-gtr', color: '#EF4444', accent: '#FFFFFF', skill: 0.98, engineLevel: 4 },
+  { name: 'D. Novak', chassisId: 'stratos-gt3', color: '#7C3AED', accent: '#FDE047', skill: 0.97, engineLevel: 4 },
+  { name: 'H. Sato', chassisId: 'drift-s15', color: '#F97316', accent: '#0F172A', skill: 0.96, engineLevel: 4 },
+  { name: 'C. Vance', chassisId: 'vanguard-v8', color: '#14B8A6', accent: '#F8FAFC', skill: 0.95, engineLevel: 3 },
+  { name: 'E. Rossi', chassisId: 'veloce-v12', color: '#EC4899', accent: '#FFFFFF', skill: 0.95, engineLevel: 3 },
+  { name: 'N. Petrov', chassisId: 'hyperion-proto', color: '#84CC16', accent: '#0F172A', skill: 0.94, engineLevel: 3 },
+  { name: 'J. Morales', chassisId: 'apex-gtr', color: '#0284C7', accent: '#FACC15', skill: 0.94, engineLevel: 3 },
+  { name: 'T. Weber', chassisId: 'vanguard-v8', color: '#B91C1C', accent: '#E2E8F0', skill: 0.93, engineLevel: 3 },
+  { name: 'P. Laurent', chassisId: 'drift-s15', color: '#EAB308', accent: '#1E293B', skill: 0.93, engineLevel: 3 },
 ];
 
 // Reusable math helpers outside render loop (zero GC)
@@ -356,14 +358,16 @@ export function RaceCanvas({
       getGroundY: builtTrack.getGroundY,
     };
 
-    // Determine starting grid slot for local player (mid-pack P7 in 15-car Last Man Standing!)
+    // Start mid-pack (P4 in Quick Race, P8 in 15-car Last Man Standing) for immediate lights-out overtaking tension!
     const remoteHumans = (multiplayerPlayers ?? []).filter((p) => p.id !== playerId);
     const localMpEntry = (multiplayerPlayers ?? []).find((p) => p.id === playerId);
     const playerSlot =
       mode === 'multiplayer' && localMpEntry
         ? localMpEntry.gridSlot
         : isLastManStanding
-        ? 6
+        ? 7
+        : mode === 'quick-race'
+        ? 3
         : 0;
 
     const playerCar = createPhysicsCar(
@@ -426,12 +430,25 @@ export function RaceCanvas({
       usedSlots.add(nextSlot);
 
       const template = AI_ROSTER[i % AI_ROSTER.length];
+      // Match elite rivals' parts to at least the player's garage upgrades so races stay fiercely competitive!
+      const isFrontContender = i < 4;
       const aiConfig: VehicleConfig = {
         ...DEFAULT_VEHICLE_CONFIG,
         chassisId: template.chassisId,
         primaryColor: template.color,
         accentColor: template.accent,
-        engineLevel: template.engineLevel,
+        engineLevel: isFrontContender
+          ? Math.max(template.engineLevel, playerVehicle.engineLevel)
+          : Math.max(template.engineLevel, Math.max(2, playerVehicle.engineLevel - 1)),
+        nitroLevel: isFrontContender
+          ? Math.max(4, playerVehicle.nitroLevel)
+          : Math.max(3, playerVehicle.nitroLevel - 1),
+        tireCompound:
+          isFrontContender || playerVehicle.tireCompound === 'racing-slick'
+            ? 'racing-slick'
+            : 'semi-slick',
+        aero: isFrontContender ? 'balanced' : DEFAULT_VEHICLE_CONFIG.aero,
+        suspension: isFrontContender ? 'stiff' : 'balanced',
       };
       const aiCar = createPhysicsCar(
         `ai-${i}`,
@@ -444,11 +461,13 @@ export function RaceCanvas({
       const aiRig = buildVehicleMesh(aiConfig, { lowPower: aiLowPower });
       scene.add(aiRig.root);
       const lanePattern = [-2.9, 2.9, -2.0, 2.0, -1.2, 1.2, -2.5, 2.5];
+      const baseLane = lanePattern[i % lanePattern.length];
       aiRivals.push({
         car: aiCar,
         rig: aiRig,
         skill: template.skill,
-        preferredLane: lanePattern[i % lanePattern.length],
+        preferredLane: baseLane,
+        currentLane: baseLane,
       });
     }
 
@@ -1158,6 +1177,10 @@ export function RaceCanvas({
             steps === 1 ? pInput : { ...pInput, shiftUp: false, shiftDown: false };
 
           const weatherGripMult = weather.getGripMultiplier();
+          const playerSlipstream =
+            !raceEnded && aiRivals.length > 0
+              ? computeSlipstreamFactor(playerCar, allPhysicsCars)
+              : 1.0;
           const res = stepCarPhysics(
             playerCar,
             stepInput,
@@ -1177,7 +1200,8 @@ export function RaceCanvas({
             builtTrack.boxColliders,
             builtTrack.breakables,
             builtTrack.getGroundY,
-            weatherGripMult
+            weatherGripMult,
+            playerSlipstream
           );
           if (res.barrierImpact > maxWallImpact) {
             maxWallImpact = res.barrierImpact;
@@ -1195,36 +1219,54 @@ export function RaceCanvas({
           for (const ai of aiRivals) {
             if (ai.car.eliminated) continue;
             let aiIn: CarInput;
+            let aiPaceMult = 1.0;
             if (raceEnded) {
               aiIn = { throttle: 0, brake: 0.75, touchBrake: true, steer: 0, handbrake: Math.abs(ai.car.speed) < 4, nitro: false };
             } else if (ai.car.finished) {
               // Keep finished AI cruising gently past the finish line so they never park & block a 2nd/3rd player!
-              const cruiseIn = computeAiInput(
+              const cruiseDecision = computeAiInput(
                 ai.car,
                 builtTrack.samples,
                 ai.skill,
                 ai.preferredLane,
+                ai.currentLane,
                 builtTrack.diversions,
-                playerCar.totalProgress,
-                trackId
+                playerCar,
+                allPhysicsCars,
+                trackId,
+                builtTrack.roadWidth,
+                totalLaps,
+                isLastManStanding,
+                raceElapsedMs
               );
+              ai.currentLane = THREE.MathUtils.damp(ai.currentLane, cruiseDecision.targetLane, 4.5, FIXED_DT);
               aiIn = {
-                ...cruiseIn,
+                ...cruiseDecision.input,
                 throttle: ai.car.speed < 22 ? 0.32 : 0,
                 brake: ai.car.speed > 26 ? 0.25 : 0,
                 nitro: false,
                 handbrake: false,
               };
             } else {
-              aiIn = computeAiInput(
+              const decision = computeAiInput(
                 ai.car,
                 builtTrack.samples,
                 ai.skill,
                 ai.preferredLane,
+                ai.currentLane,
                 builtTrack.diversions,
-                playerCar.totalProgress,
-                trackId
+                playerCar,
+                allPhysicsCars,
+                trackId,
+                builtTrack.roadWidth,
+                totalLaps,
+                isLastManStanding,
+                raceElapsedMs
               );
+              ai.currentLane = THREE.MathUtils.damp(ai.currentLane, decision.targetLane, 5.2, FIXED_DT);
+              aiIn = decision.input;
+              const aiSlipstream = computeSlipstreamFactor(ai.car, allPhysicsCars);
+              aiPaceMult = decision.paceMultiplier * aiSlipstream;
             }
             stepCarPhysics(
               ai.car,
@@ -1245,7 +1287,8 @@ export function RaceCanvas({
               builtTrack.boxColliders,
               builtTrack.breakables,
               builtTrack.getGroundY,
-              weatherGripMult
+              weatherGripMult,
+              aiPaceMult
             );
           }
 

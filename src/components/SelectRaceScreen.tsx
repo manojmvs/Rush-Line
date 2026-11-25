@@ -429,7 +429,7 @@ export function SelectRaceScreen({
                 onChange={(e) => onSelectClimateMode(e.target.value as ClimateMode)}
                 className="h-7 px-2 rounded bg-[#162338] border border-white/18 text-xs font-display italic font-bold text-white focus:outline-none focus:border-[#FFD014]"
               >
-                <option value="dynamic">Dynamic (Rain/Snow/Mist)</option>
+                <option value="dynamic">Auto (1 Climate / Race)</option>
                 <option value="rain">Rain</option>
                 <option value="snow">Snow</option>
                 <option value="mist">Mist</option>

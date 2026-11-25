@@ -1080,7 +1080,7 @@ export function RaceHud({
                     <span>TRACK &amp; CLIMATE</span>
                   </div>
                   <p className="text-[11px] sm:text-xs text-slate-200 mt-1 leading-snug">
-                    {trackObjective.challenge} Weather: {climateMode === 'dynamic' ? 'Dynamic (Rain / Mist / Snow)' : weatherLabel[activeWeather]}.
+                    {trackObjective.challenge} Weather: {climateMode === 'dynamic' ? 'Single Forecast Shift' : weatherLabel[activeWeather]}.
                   </p>
                 </div>
 

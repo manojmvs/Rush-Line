@@ -2277,6 +2277,8 @@ export function buildTrackScene(
   const sampleTerrainHeight = (x: number, z: number): { y: number; distToTrack: number } => {
     let minSq = Infinity;
     let nearestY = 0;
+    let weightSum = 0;
+    let weightedYSum = 0;
     for (let i = 0; i < coarseSamples.length; i++) {
       const sp = coarseSamples[i].pos;
       const dx = x - sp.x;
@@ -2286,6 +2288,10 @@ export function buildTrackScene(
         minSq = dSq;
         nearestY = sp.y;
       }
+      // Smooth inverse-distance weight prevents sharp Voronoi cliff discontinuities between nearby elevated/low track legs
+      const w = 1 / (dSq + 360);
+      weightSum += w;
+      weightedYSum += sp.y * w;
     }
     const dist = Math.sqrt(minSq);
 
@@ -2301,14 +2307,15 @@ export function buildTrackScene(
       Math.sin(x * 0.031 - z * 0.025) * (hillAmp * 0.35);
 
     // Extra vertical clearance under the road on Off-Road & Hill so coarse terrain quads NEVER poke through valleys!
-    const roadClearance = isOffroad || isHill ? 0.92 : 0.32;
+    const roadClearance = isOffroad || isHill ? 0.85 : 0.32;
     const flatZone = barrierOffset + (isOffroad || isHill ? 6.5 : 3.5);
     if (dist <= flatZone) {
       return { y: nearestY - roadClearance, distToTrack: dist };
     }
-    const blend = THREE.MathUtils.clamp((dist - flatZone) / 36, 0, 1);
+    const blend = THREE.MathUtils.clamp((dist - flatZone) / 42, 0, 1);
     const smoothBlend = blend * blend * (3 - 2 * blend);
-    const farBase = isStadium ? -0.35 : Math.max(-0.4, nearestY * 0.42 + hills);
+    const smoothTrackY = weightSum > 0 ? weightedYSum / weightSum : nearestY;
+    const farBase = isStadium ? -0.35 : Math.max(-0.4, smoothTrackY * 0.46 + hills);
     const baseFade = THREE.MathUtils.lerp(nearestY - roadClearance, farBase, smoothBlend);
     return { y: baseFade, distToTrack: dist };
   };
@@ -2328,10 +2335,10 @@ export function buildTrackScene(
     ? 12
     : lowPower
     ? isOffroad || isHill
-      ? 88
+      ? 96
       : 64
     : isOffroad || isHill
-    ? 140
+    ? 160
     : 96;
   const groundGeo = new THREE.PlaneGeometry(1800, 1800, groundSegs, groundSegs);
   groundGeo.rotateX(-Math.PI / 2);
@@ -2381,7 +2388,7 @@ export function buildTrackScene(
     if (absLat <= skirtEdge) {
       return Math.max(roadY - 0.02, meshY);
     }
-    const embOuter = barrierOffset + 4.4;
+    const embOuter = barrierOffset + 7.5;
     if (absLat < embOuter) {
       const t = (absLat - skirtEdge) / (embOuter - skirtEdge);
       const embY = THREE.MathUtils.lerp(roadY - 0.02, meshY - 0.15, t);
@@ -2539,11 +2546,12 @@ export function buildTrackScene(
     group.add(skirt);
     disposables.push(skirtGeo, skirtMat);
 
-    // Solid sloped earthen embankment sealing both outer edges of the road skirt firmly down into the terrain mesh
-    // so roads never appear as floating ribbons from low or side camera angles!
+    // Solid 2-stage sloped earthen embankment sealing both outer edges of the road skirt deeply down into the terrain mesh
+    // so elevated rally hills and roads never show gaps or floating undersides from any camera angle!
     const buildEmbankmentSide = (side: -1 | 1): THREE.BufferGeometry => {
       const innerLat = side * (barrierOffset + 0.72);
-      const outerLat = side * (barrierOffset + 4.4);
+      const midLat = side * (barrierOffset + 3.4);
+      const outerLat = side * (barrierOffset + 7.5);
       const n = samples.length;
       const positions: number[] = [];
       const uvs: number[] = [];
@@ -2552,24 +2560,32 @@ export function buildTrackScene(
         const s = samples[i % n];
         const ix = s.pos.x + s.right.x * innerLat;
         const iz = s.pos.z + s.right.z * innerLat;
+        const mx = s.pos.x + s.right.x * midLat;
+        const mz = s.pos.z + s.right.z * midLat;
         const ox = s.pos.x + s.right.x * outerLat;
         const oz = s.pos.z + s.right.z * outerLat;
         const iy = s.pos.y - 0.02;
-        const oy = sampleMeshGroundY(ox, oz) - 0.45;
+        const midGround = sampleMeshGroundY(mx, mz);
+        const my = Math.min(iy - 0.25, Math.max(midGround - 0.2, iy - 1.45));
+        const oy = Math.min(sampleMeshGroundY(ox, oz) - 1.25, s.pos.y - 2.4);
         const vCoord = (i / n) * length * 0.08;
         if (side < 0) {
-          positions.push(ox, oy, oz, ix, iy, iz);
+          positions.push(ox, oy, oz, mx, my, mz, ix, iy, iz);
         } else {
-          positions.push(ix, iy, iz, ox, oy, oz);
+          positions.push(ix, iy, iz, mx, my, mz, ox, oy, oz);
         }
-        uvs.push(0, vCoord, 1, vCoord);
+        uvs.push(0, vCoord, 0.5, vCoord, 1, vCoord);
       }
       for (let i = 0; i < n; i++) {
-        const a = i * 2;
-        const b = a + 1;
-        const c = a + 2;
-        const d = a + 3;
-        indices.push(a, b, c, b, d, c);
+        const row0 = i * 3;
+        const row1 = (i + 1) * 3;
+        for (let seg = 0; seg < 2; seg++) {
+          const a = row0 + seg;
+          const b = a + 1;
+          const c = row1 + seg;
+          const d = c + 1;
+          indices.push(a, b, c, b, d, c);
+        }
       }
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -4046,7 +4062,12 @@ export function buildTrackScene(
   // A. Scenic Sparkling Turquoise Trackside Ponds (alpine / natural tracks only — never in City!)
   const pondCenters: Array<{ x: number; y: number; z: number; rx: number; rz: number }> = [];
   if (!isCity) {
-    const candidatePondIndices = isGoKart ? [45, 295] : [34, 210, 440];
+    // Keep ponds in naturally level meadow clearings (never on steep hillsides like off-road start!)
+    const candidatePondIndices = isGoKart
+      ? [45, 295]
+      : isOffroad || isHill
+      ? [155, 285, 465]
+      : [34, 210, 440];
     const pondWaterMat = new THREE.MeshStandardMaterial({
       color: isNight ? 0x113654 : isEvening ? 0x3b8fb8 : 0x2eb2e8,
       roughness: 0.16,
@@ -4059,31 +4080,52 @@ export function buildTrackScene(
       metalness: 0.02,
       flatShading: true,
     });
-    const pondCircleGeo = new THREE.CircleGeometry(1, 14);
+    const pondCircleGeo = new THREE.CircleGeometry(1, 16);
     pondCircleGeo.rotateX(-Math.PI / 2);
-    // Solid earthen pebble basin rim extending downward 2.6m so pond shorelines sit embedded on sloped terrain!
-    const pondBasinGeo = new THREE.CylinderGeometry(1.0, 1.24, 2.6, 14);
-    pondBasinGeo.translate(0, -1.3, 0);
+    // Deep flared earthen shoreline basin (12m downward skirt) so pond edges ALWAYS anchor deeply into terrain!
+    const pondBasinGeo = new THREE.CylinderGeometry(1.0, 1.38, 12.0, 16);
+    pondBasinGeo.translate(0, -6.0, 0);
     disposables.push(pondWaterMat, pondBankMat, pondCircleGeo, pondBasinGeo);
 
     for (const si of candidatePondIndices) {
       const s = samples[si % samples.length];
-      const rx = isGoKart ? 11 : 17;
-      const rz = isGoKart ? 18 : 28;
-      const dist = barrierOffset + rx + 5.5;
+      const rx = isGoKart ? 11 : isOffroad || isHill ? 13 : 17;
+      const rz = isGoKart ? 18 : isOffroad || isHill ? 20 : 28;
+      const dist = barrierOffset + rx + 8.5;
       const px = s.pos.x + s.right.x * dist;
       const pz = s.pos.z + s.right.z * dist;
-      if (!isClearOfTrack(px, pz, barrierOffset + rx + 2.5)) continue;
+      if (!isClearOfTrack(px, pz, barrierOffset + rx + 4.0)) continue;
 
-      const py =
-        Math.max(
-          sampleMeshGroundY(px, pz),
-          sampleMeshGroundY(px + rx * 0.7, pz),
-          sampleMeshGroundY(px - rx * 0.7, pz),
-          sampleMeshGroundY(px, pz + rz * 0.7),
-          sampleMeshGroundY(px, pz - rz * 0.7)
-        ) + 0.12;
       const yaw = Math.atan2(s.tangent.x, s.tangent.z);
+      const cosY = Math.cos(yaw);
+      const sinY = Math.sin(yaw);
+      const probeOffsets: Array<[number, number]> = [
+        [0, 0],
+        [rx, 0],
+        [-rx, 0],
+        [0, rz],
+        [0, -rz],
+        [rx * 0.72, rz * 0.72],
+        [-rx * 0.72, rz * 0.72],
+        [rx * 0.72, -rz * 0.72],
+        [-rx * 0.72, -rz * 0.72],
+      ];
+      let minH = Infinity;
+      let maxH = -Infinity;
+      let sumH = 0;
+      for (const [lx, lz] of probeOffsets) {
+        const wx = px + lx * cosY + lz * sinY;
+        const wz = pz - lx * sinY + lz * cosY;
+        const h = sampleMeshGroundY(wx, wz);
+        if (h < minH) minH = h;
+        if (h > maxH) maxH = h;
+        sumH += h;
+      }
+      // Never place a flat pond basin across a steep hillside where it would protrude like floating land!
+      if (maxH - minH > 2.2) continue;
+
+      const avgH = sumH / probeOffsets.length;
+      const py = Math.max(avgH + 0.08, maxH - 0.18);
 
       const bankMesh = new THREE.Mesh(pondBasinGeo, pondBankMat);
       bankMesh.position.set(px, py - 0.04, pz);
@@ -5567,7 +5609,8 @@ export function buildTrackScene(
     const mWidth = 95 + rand() * 85;
     const mHeight = 95 + rand() * 115;
 
-    dummy.position.set(mx, -8, mz);
+    const mtBaseY = Math.min(-12, sampleMeshGroundY(mx, mz) - 10);
+    dummy.position.set(mx, mtBaseY, mz);
     dummy.rotation.set(0, rand() * Math.PI, 0);
     dummy.scale.set(mWidth, mHeight, mWidth * (0.85 + rand() * 0.3));
     dummy.updateMatrix();

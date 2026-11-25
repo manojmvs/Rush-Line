@@ -33,7 +33,8 @@ export interface WeatherSystem {
   dispose: () => void;
 }
 
-const DYNAMIC_CYCLE_SEQUENCE: ActiveWeather[] = ['clear', 'rain', 'mist', 'snow'];
+const RACE_CLIMATE_ROTATION: ActiveWeather[] = ['rain', 'snow', 'mist'];
+let nextDynamicRaceWeatherIdx = 0;
 
 function createSnowflakeTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
@@ -236,9 +237,15 @@ export function createWeatherSystem(opts: WeatherSystemOptions): WeatherSystem {
   const baseRoadMetalness = roadMaterial ? roadMaterial.metalness : 0.06;
 
   let climateMode: ClimateMode = opts.climateMode;
+  let raceTargetWeather: ActiveWeather =
+    RACE_CLIMATE_ROTATION[nextDynamicRaceWeatherIdx % RACE_CLIMATE_ROTATION.length];
+  if (climateMode === 'dynamic') {
+    nextDynamicRaceWeatherIdx = (nextDynamicRaceWeatherIdx + 1) % RACE_CLIMATE_ROTATION.length;
+  }
+
   let activeWeather: ActiveWeather = climateMode === 'dynamic' ? 'clear' : climateMode;
-  let cycleIdx = 0;
-  let cycleTimer = 0;
+  let hasShiftedThisRace = climateMode !== 'dynamic';
+  let shiftTimer = 0;
   let elapsed = 0;
   let initializedPos = false;
 
@@ -249,12 +256,17 @@ export function createWeatherSystem(opts: WeatherSystemOptions): WeatherSystem {
 
   const setClimateMode = (nextMode: ClimateMode) => {
     climateMode = nextMode;
-    cycleTimer = 0;
+    shiftTimer = 0;
     if (nextMode === 'dynamic') {
-      // Advance immediately to next weather if already clear for a while, or stay on current
-      cycleIdx = Math.max(0, DYNAMIC_CYCLE_SEQUENCE.indexOf(activeWeather));
+      // Pick one single climate for this race and hold it cleanly (no multi-climate carousel)
+      raceTargetWeather =
+        RACE_CLIMATE_ROTATION[nextDynamicRaceWeatherIdx % RACE_CLIMATE_ROTATION.length];
+      nextDynamicRaceWeatherIdx = (nextDynamicRaceWeatherIdx + 1) % RACE_CLIMATE_ROTATION.length;
+      activeWeather = raceTargetWeather;
+      hasShiftedThisRace = true;
     } else {
       activeWeather = nextMode;
+      hasShiftedThisRace = true;
     }
   };
 
@@ -268,14 +280,12 @@ export function createWeatherSystem(opts: WeatherSystemOptions): WeatherSystem {
     const safeDt = Math.min(dt, 0.05);
     elapsed += safeDt;
 
-    // Auto-cycle climate smoothly across Clear -> Rain -> Mist -> Snow on ANY track
-    if (climateMode === 'dynamic' && allowCycle) {
-      cycleTimer += safeDt;
-      const stageDuration = activeWeather === 'clear' ? 15 : 22;
-      if (cycleTimer >= stageDuration) {
-        cycleTimer = 0;
-        cycleIdx = (cycleIdx + 1) % DYNAMIC_CYCLE_SEQUENCE.length;
-        activeWeather = DYNAMIC_CYCLE_SEQUENCE[cycleIdx];
+    // In dynamic mode, transition ONCE per race from clear skies into that race's single climate (Rain, Snow, or Mist)
+    if (climateMode === 'dynamic' && allowCycle && !hasShiftedThisRace) {
+      shiftTimer += safeDt;
+      if (shiftTimer >= 12) {
+        hasShiftedThisRace = true;
+        activeWeather = raceTargetWeather;
       }
     }
 
