@@ -1,0 +1,6 @@
+{
+  "name": "Apex Circuit",
+  "description": "Cross-platform 3D landscape car racing game with realistic tire and suspension physics, custom vehicle garage, live multiplayer lobbies, and global leaderboards.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
