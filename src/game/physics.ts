@@ -807,7 +807,9 @@ export function stepCarPhysics(
   const isDirtTrack = trackId === 'offroad-track';
   const trackDriftEase = isDirtTrack
     ? 1.48
-    : trackId === 'gokart-track' || trackId === 'city-track' || trackId === 'hill-track'
+    : trackId === 'gokart-track'
+    ? 1.34
+    : trackId === 'city-track' || trackId === 'hill-track'
     ? 1.24
     : 1.12;
 

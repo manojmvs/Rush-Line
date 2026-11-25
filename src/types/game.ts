@@ -376,11 +376,11 @@ export const TRACK_SPECS: Record<TrackId, TrackSpec> = {
     id: 'gokart-track',
     name: 'Go-Kart Track',
     location: 'Technical Kart Arena',
-    lengthMeters: 1260,
+    lengthMeters: 1588,
     laps: 3,
     difficulty: 'GT Master',
     timeOfDay: 'Daylight',
-    description: 'Compact karting track packed with tight hairpins, rapid chicanes, and chained drift zones.',
+    description: 'Tire-walled karting arena packed with 12+ tight hairpins, flowing S-curves, and chained drift zones.',
   },
 };
 

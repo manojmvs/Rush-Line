@@ -522,21 +522,37 @@ const TRACK_CONTROL_POINTS: Record<TrackId, Array<[number, number, number]>> = {
     [14, 0, 175],
     [-8, 0, 95],
   ],
-  // 7. Go-Kart Track: Compact, technical karting arena packed with hairpins & chained drift S-curves
+  // 7. Go-Kart Track: Curve-packed technical karting arena with 12+ flowing hairpins, S-curves & chained drift zones
   'gokart-track': [
+    // Dead-straight Start/Finish launch zone
     [0, 0, 0],
-    [0, 0, -80],
-    [32, 0, -130],
-    [100, 0, -134],
-    [142, 0, -88],
-    [106, 0, -44],
-    [50, 0, -52],
-    [48, 0, 6],
-    [132, 0, 28],
-    [148, 0, 90],
-    [92, 0, 130],
-    [28, 0, 118],
-    [-4, 0, 66],
+    [0, 0, -76],
+    // T1-T3: Sweeping North-West Drift S-Curve
+    [44, 0, -142],
+    [108, 0, -134],
+    [158, 0, -190],
+    // T4-T5: Wide North Drift Hairpin Bowl
+    [230, 0, -198],
+    [276, 0, -142],
+    [236, 0, -82],
+    // T6-T8: Flowing East Drift Esses (Right -> Left -> Right)
+    [284, 0, -22],
+    [270, 0, 48],
+    [198, 0, 62],
+    // T9-T11: Infield Technical Switchback Hairpin
+    [162, 0, -10],
+    [98, 0, -18],
+    [90, 0, 56],
+    // T12-T14: South-East Wide Drift Carousel & Hairpin
+    [168, 0, 112],
+    [172, 0, 184],
+    [102, 0, 204],
+    // T15-T17: South Drift Chicane & Sweeping Final Turn onto Straight
+    [50, 0, 154],
+    [-18, 0, 174],
+    [-62, 0, 124],
+    [-38, 0, 66],
+    [0, 0, 42],
   ],
 };
 
@@ -760,6 +776,55 @@ function createSidewalkTexture(maxAniso: number, isNight: boolean): THREE.Canvas
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = maxAniso;
+  return tex;
+}
+
+function createTireBarrierTexture(maxAniso: number): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 256;
+  const ctx = canvas.getContext('2d')!;
+
+  // Neutral bright base so per-instance colors (Red, White, Matte Black Rubber) tint cleanly
+  ctx.fillStyle = '#e5e7eb';
+  ctx.fillRect(0, 0, 256, 256);
+
+  // Subtle moulded rubber tread ribs & sidewall grooves around the torus circumference
+  for (let y = 0; y < 256; y += 16) {
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.24)';
+    ctx.fillRect(0, y, 256, 4);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.14)';
+    ctx.fillRect(0, y + 4, 256, 2);
+  }
+
+  // Diagonal kart-tire tread blocks along the central crown band
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.22)';
+  for (let x = -32; x < 288; x += 22) {
+    for (let y = 76; y < 180; y += 20) {
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + 12, y + 7);
+      ctx.lineTo(x + 12, y + 14);
+      ctx.lineTo(x, y + 7);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  // Fine rubber grain & subtle trackside tire-scuff weathering
+  for (let i = 0; i < 2200; i++) {
+    const x = Math.random() * 256;
+    const y = Math.random() * 256;
+    ctx.fillStyle = Math.random() > 0.55 ? 'rgba(15, 23, 42, 0.14)' : 'rgba(255, 255, 255, 0.08)';
+    ctx.fillRect(x, y, 2, 2);
+  }
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(6, 2);
   tex.anisotropy = maxAniso;
   return tex;
 }
@@ -2337,8 +2402,8 @@ export function buildTrackScene(
       { start: 468, len: 38, left: 'SHORT', right: 'SWEEP' },
     ],
     'gokart-track': [
-      { start: 86, len: 34, left: 'TIGHT', right: 'WIDE' },
-      { start: 356, len: 36, left: 'APEX', right: 'DRIFT' },
+      { start: 124, len: 30, left: 'TIGHT', right: 'WIDE' },
+      { start: 382, len: 32, left: 'APEX', right: 'DRIFT' },
     ],
   };
 
@@ -2998,15 +3063,191 @@ export function buildTrackScene(
       group.add(postInst, capInst);
     }
     disposables.push(urbanPostGeo, urbanPostMat, urbanCapGeo, urbanCapMat);
+  } else if (isGoKart) {
+    // Go-Kart Track: Authentic 3D Stacked Motorsport Tire-Barrier Fences lining both edges of the entire circuit!
+    const tireTex = createTireBarrierTexture(effectiveAniso);
+    const tireGeo = new THREE.TorusGeometry(0.42, 0.21, lowPower ? 8 : 10, lowPower ? 14 : 18);
+    tireGeo.rotateX(Math.PI / 2);
+
+    const tireMat = new THREE.MeshStandardMaterial({
+      map: tireTex,
+      color: 0xffffff,
+      roughness: 0.86,
+      metalness: 0.04,
+    });
+
+    // Dark vulcanized rubber retaining strap & steel anchor stakes linking the tire stacks
+    const strapMat = new THREE.MeshStandardMaterial({
+      color: isNight ? 0x161a22 : 0x1f242e,
+      roughness: 0.9,
+      metalness: 0.08,
+      side: THREE.DoubleSide,
+    });
+    const stakeGeo = new THREE.CylinderGeometry(0.055, 0.065, 1.02, 6);
+    stakeGeo.translate(0, 0.51, 0);
+    const stakeMat = new THREE.MeshStandardMaterial({
+      color: 0x334155,
+      roughness: 0.45,
+      metalness: 0.65,
+    });
+
+    // Compute lateral offset of the tire fence center (flares cleanly outside split-route bypass aprons!)
+    const tireWallLatAt = (idx: number): number => {
+      let extra = 0;
+      for (const div of diversions) {
+        const pad = 8;
+        if (idx >= div.startIdx - pad && idx <= div.endIdx + pad) {
+          let flare = 1.0;
+          if (idx < div.startIdx) {
+            const u = (idx - (div.startIdx - pad)) / pad;
+            flare = u * u * (3 - 2 * u);
+          } else if (idx > div.endIdx) {
+            const u = (div.endIdx + pad - idx) / pad;
+            flare = u * u * (3 - 2 * u);
+          }
+          extra = Math.max(extra, div.extraOuterWidth * flare * 0.72);
+        }
+      }
+      // Inner rubber edge (offset - 0.63m) sits flush with physics barrierOffset + extra!
+      return barrierOffset + extra + 0.56;
+    };
+
+    // Sleek matte-black rubber retaining strap behind the tire stacks binding the fence together
+    const leftStrapGeo = buildVariableWallGeometry(samples, (i) => -(tireWallLatAt(i) + 0.42), 0.26);
+    const rightStrapGeo = buildVariableWallGeometry(samples, (i) => tireWallLatAt(i) + 0.42, 0.26);
+    const leftStrap = new THREE.Mesh(leftStrapGeo, strapMat);
+    const rightStrap = new THREE.Mesh(rightStrapGeo, strapMat);
+    leftStrap.position.y = 0.34;
+    rightStrap.position.y = 0.34;
+    group.add(leftStrap, rightStrap);
+    disposables.push(leftStrapGeo, rightStrapGeo, strapMat);
+
+    const tireMatrices: THREE.Matrix4[] = [];
+    const tireColors: THREE.Color[] = [];
+    const stakeMatrices: THREE.Matrix4[] = [];
+
+    const colRed = new THREE.Color(isNight ? 0xb91c1c : 0xdc2626);
+    const colWhite = new THREE.Color(isNight ? 0xcbd5e1 : 0xf1f5f9);
+    const colBlack = new THREE.Color(isNight ? 0x1e222a : 0x2a2f3a);
+    const tmpColor = new THREE.Color();
+
+    const spacing = 1.24; // Close edge-to-edge tire stacks (outer diameter 1.26m)
+    const sampleCount = samples.length;
+
+    for (const side of [-1, 1] as const) {
+      let carryDist = 0;
+      let stackCounter = 0;
+
+      for (let i = 0; i < sampleCount; i++) {
+        const s0 = samples[i];
+        const s1 = samples[(i + 1) % sampleCount];
+        const lat0 = side * tireWallLatAt(i);
+        const lat1 = side * tireWallLatAt((i + 1) % sampleCount);
+
+        const x0 = s0.pos.x + s0.right.x * lat0;
+        const y0 = s0.pos.y;
+        const z0 = s0.pos.z + s0.right.z * lat0;
+
+        const x1 = s1.pos.x + s1.right.x * lat1;
+        const y1 = s1.pos.y;
+        const z1 = s1.pos.z + s1.right.z * lat1;
+
+        const segLen = Math.hypot(x1 - x0, z1 - z0);
+        if (segLen < 0.01) continue;
+
+        // Determine if this edge is the outside of a sharp drift corner (for taller 3-tier tire walls!)
+        const nextS = samples[(i + 4) % sampleCount];
+        const crossY = s0.tangent.z * nextS.tangent.x - s0.tangent.x * nextS.tangent.z;
+        const isOutsideCurve =
+          s0.curvature > 0.11 && ((side === 1 && crossY < -0.02) || (side === -1 && crossY > 0.02));
+        const tiers = isOutsideCurve && s0.curvature > 0.145 ? 3 : 2;
+
+        let d = carryDist;
+        while (d < segLen) {
+          const frac = d / segLen;
+          const bx = x0 + (x1 - x0) * frac;
+          const by = y0 + (y1 - y0) * frac;
+          const bz = z0 + (z1 - z0) * frac;
+
+          // Classic alternating karting blocks: 4 Red stacks, 4 White stacks, with dark rubber base/accent tires
+          const blockIdx = Math.floor(stackCounter / 4);
+          const isRedBlock = blockIdx % 2 === 0;
+          const isAccentBlackStack = stackCounter % 8 === 3 || stackCounter % 8 === 7;
+
+          for (let tier = 0; tier < tiers; tier++) {
+            const hash = Math.sin(stackCounter * 12.9898 + tier * 78.233 + side * 31.7) * 43758.5453;
+            const jitter = (hash - Math.floor(hash) - 0.5) * 0.045;
+            const rotY = (hash - Math.floor(hash)) * Math.PI * 2;
+
+            dummy.position.set(bx + jitter, by + 0.21 + tier * 0.415, bz - jitter);
+            dummy.rotation.set(0, rotY, 0);
+            dummy.scale.set(1.0, 1.0, 1.0);
+            dummy.updateMatrix();
+            tireMatrices.push(dummy.matrix.clone());
+
+            // Alternate raw dark rubber tires on bottom tier of every other stack for authentic karting look
+            if (isAccentBlackStack || (tier === 0 && stackCounter % 2 === 1)) {
+              tmpColor.copy(colBlack);
+            } else {
+              tmpColor.copy(isRedBlock ? colRed : colWhite);
+            }
+            // Subtle per-tire shade variation so stacks look tactile & hand-built
+            const shade = 0.92 + ((hash - Math.floor(hash)) * 0.14);
+            tmpColor.multiplyScalar(shade);
+            tireColors.push(tmpColor.clone());
+          }
+
+          // Steel anchor stake behind every 4th tire stack
+          if (stackCounter % 4 === 0) {
+            const rx = s0.right.x * side;
+            const rz = s0.right.z * side;
+            dummy.position.set(bx + rx * 0.62, by, bz + rz * 0.62);
+            dummy.rotation.set(0, 0, 0);
+            dummy.scale.set(1, tiers === 3 ? 1.32 : 1.0, 1);
+            dummy.updateMatrix();
+            stakeMatrices.push(dummy.matrix.clone());
+          }
+
+          stackCounter++;
+          d += spacing;
+        }
+        carryDist = d - segLen;
+      }
+    }
+
+    if (tireMatrices.length > 0) {
+      const tireInst = new THREE.InstancedMesh(tireGeo, tireMat, tireMatrices.length);
+      for (let i = 0; i < tireMatrices.length; i++) {
+        tireInst.setMatrixAt(i, tireMatrices[i]);
+        tireInst.setColorAt(i, tireColors[i]);
+      }
+      tireInst.instanceMatrix.needsUpdate = true;
+      if (tireInst.instanceColor) tireInst.instanceColor.needsUpdate = true;
+      tireInst.castShadow = !lowPower;
+      tireInst.receiveShadow = true;
+      tireInst.computeBoundingSphere();
+      group.add(tireInst);
+    }
+
+    if (stakeMatrices.length > 0) {
+      const stakeInst = new THREE.InstancedMesh(stakeGeo, stakeMat, stakeMatrices.length);
+      for (let i = 0; i < stakeMatrices.length; i++) {
+        stakeInst.setMatrixAt(i, stakeMatrices[i]);
+      }
+      stakeInst.instanceMatrix.needsUpdate = true;
+      stakeInst.computeBoundingSphere();
+      group.add(stakeInst);
+    }
+
+    disposables.push(tireTex, tireGeo, tireMat, stakeGeo, stakeMat);
   } else {
-    // Racing Track / Hill / Stadium (Armco barrier) & Go-Kart Track (Red/White tire wall)
-    const leftRailGeo = buildGuardrailGeometry(samples, -barrierOffset, isGoKart ? 0.92 : 1.08);
-    const rightRailGeo = buildGuardrailGeometry(samples, barrierOffset, isGoKart ? 0.92 : 1.08);
+    // Racing Track / Hill / Stadium (Armco barrier)
+    const leftRailGeo = buildGuardrailGeometry(samples, -barrierOffset, 1.08);
+    const rightRailGeo = buildGuardrailGeometry(samples, barrierOffset, 1.08);
     const railMat = new THREE.MeshStandardMaterial({
-      map: isGoKart ? kerbTex : undefined,
-      color: isGoKart ? 0xffffff : isNight ? 0x64748b : 0xdbe4ef,
+      color: isNight ? 0x64748b : 0xdbe4ef,
       roughness: 0.4,
-      metalness: isGoKart ? 0.12 : 0.65,
+      metalness: 0.65,
       side: THREE.DoubleSide,
     });
     const leftRail = new THREE.Mesh(leftRailGeo, railMat);
