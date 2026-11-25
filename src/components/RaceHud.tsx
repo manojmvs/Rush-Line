@@ -3,6 +3,9 @@ import {
   Camera,
   ChevronLeft,
   ChevronRight,
+  CloudFog,
+  CloudRain,
+  CloudSun,
   Coins,
   Compass,
   Crosshair,
@@ -14,8 +17,11 @@ import {
   Repeat,
   RotateCcw,
   Settings,
+  Skull,
   Smartphone,
+  Snowflake,
   Star,
+  Sun,
   Timer,
   Trophy,
   Volume2,
@@ -28,7 +34,9 @@ import { useGyroSteering } from '../hooks/useGyroSteering.ts';
 import {
   TRACK_SPECS,
   formatLapTime,
+  type ActiveWeather,
   type CameraMode,
+  type ClimateMode,
   type GameMode,
   type PerformanceMode,
   type RaceTelemetry,
@@ -44,6 +52,7 @@ type HoldControlKey = 'left' | 'right' | 'gas' | 'brake' | 'reverse' | 'nitro';
 interface RaceHudProps {
   trackId: TrackId;
   mode: GameMode;
+  climateMode: ClimateMode;
   telemetry: RaceTelemetry;
   paused: boolean;
   showObjective: boolean;
@@ -59,6 +68,7 @@ interface RaceHudProps {
   isNewBest: boolean;
   touchInputRef: React.MutableRefObject<TouchInputState>;
   onCycleCamera: () => void;
+  onCycleClimate: () => void;
   onToggleTransmission: () => void;
   onSelectSteeringMode: (mode: SteeringMode) => void;
   onSelectPerformanceMode: (mode: PerformanceMode) => void;
@@ -123,6 +133,7 @@ const EMPTY_PRESSED: Record<HoldControlKey, boolean> = {
 export function RaceHud({
   trackId,
   mode,
+  climateMode,
   telemetry,
   paused,
   showObjective,
@@ -138,6 +149,7 @@ export function RaceHud({
   isNewBest,
   touchInputRef,
   onCycleCamera,
+  onCycleClimate,
   onToggleTransmission,
   onSelectSteeringMode,
   onSelectPerformanceMode,
@@ -176,11 +188,28 @@ export function RaceHud({
   const prevCountdownRef = useRef<number>(telemetry.countdown);
   const [lapBanner, setLapBanner] = useState<{ lap: number; isFinal: boolean; isStart: boolean } | null>(null);
 
+  // Track dynamic climate shifts to display a brief non-blocking weather alert
+  const prevWeatherRef = useRef<ActiveWeather | undefined>(telemetry.activeWeather);
+  const [weatherBanner, setWeatherBanner] = useState<ActiveWeather | null>(null);
+
+  // Track Last Man Standing lap-end eliminations for dramatic knockout banner
+  const prevElimTsRef = useRef<number>(0);
+  const [elimBanner, setElimBanner] = useState<{
+    name: string;
+    lap: number;
+    rank: number;
+    isPlayer: boolean;
+  } | null>(null);
+
   useEffect(() => {
     if (telemetry.finished || showObjective) {
       setLapBanner(null);
+      setWeatherBanner(null);
+      setElimBanner(null);
       prevLapRef.current = 0;
       prevCountdownRef.current = telemetry.countdown;
+      prevWeatherRef.current = telemetry.activeWeather;
+      prevElimTsRef.current = telemetry.lastEliminated?.timestamp ?? 0;
       return;
     }
 
@@ -201,7 +230,38 @@ export function RaceHud({
       const t = window.setTimeout(() => setLapBanner(null), 2400);
       return () => window.clearTimeout(t);
     }
-  }, [telemetry.lap, telemetry.totalLaps, telemetry.countdown, telemetry.finished, showObjective]);
+  }, [telemetry.lap, telemetry.totalLaps, telemetry.countdown, telemetry.finished, showObjective, telemetry.activeWeather, telemetry.lastEliminated?.timestamp]);
+
+  useEffect(() => {
+    const nextW = telemetry.activeWeather;
+    if (!nextW || telemetry.finished || showObjective || telemetry.countdown > 0) {
+      prevWeatherRef.current = nextW;
+      return;
+    }
+    if (prevWeatherRef.current && prevWeatherRef.current !== nextW) {
+      prevWeatherRef.current = nextW;
+      setWeatherBanner(nextW);
+      const t = window.setTimeout(() => setWeatherBanner(null), 2600);
+      return () => window.clearTimeout(t);
+    }
+    prevWeatherRef.current = nextW;
+  }, [telemetry.activeWeather, telemetry.countdown, telemetry.finished, showObjective]);
+
+  useEffect(() => {
+    const elim = telemetry.lastEliminated;
+    if (!elim || telemetry.finished || showObjective) return;
+    if (elim.timestamp !== prevElimTsRef.current) {
+      prevElimTsRef.current = elim.timestamp;
+      setElimBanner({
+        name: elim.name,
+        lap: elim.lap,
+        rank: elim.rank,
+        isPlayer: elim.isPlayer,
+      });
+      const t = window.setTimeout(() => setElimBanner(null), 3200);
+      return () => window.clearTimeout(t);
+    }
+  }, [telemetry.lastEliminated, telemetry.finished, showObjective]);
 
   const {
     visualSteer: gyroVisualSteer,
@@ -500,10 +560,30 @@ export function RaceHud({
   const arcTotalLen = 198;
   const activeArcLen = Math.max(6, Math.round(rpmRatio * arcTotalLen));
 
-  // Win / Loss rule: 1st, 2nd, or 3rd place (or Time Trial completion) = WIN / LEVEL COMPLETE; 4th+ = LOSE SCREEN
-  const isWinner = mode === 'time-trial' || telemetry.position <= 3;
+  const isLastManStanding = mode === 'last-man-standing';
+  const aliveRacers = telemetry.aliveRacers ?? telemetry.totalRacers;
+  const activeWeather: ActiveWeather = telemetry.activeWeather ?? 'clear';
+  const inDangerZone =
+    isLastManStanding && aliveRacers > 1 && telemetry.position >= aliveRacers && !telemetry.finished;
+
+  // Win / Loss rule:
+  // - Time Trial: always complete
+  // - Last Man Standing: ONLY 1st place final survivor wins! Any elimination = Lose Screen
+  // - Quick Race / Multiplayer: 1st, 2nd, or 3rd place = WIN; 4th+ = LOSE SCREEN
+  const isWinner =
+    mode === 'time-trial'
+      ? true
+      : isLastManStanding
+      ? !telemetry.playerEliminated && telemetry.position === 1
+      : telemetry.position <= 3;
   const earnedStars =
-    mode === 'time-trial' || telemetry.position === 1
+    mode === 'time-trial'
+      ? 3
+      : isLastManStanding
+      ? isWinner
+        ? 3
+        : 0
+      : telemetry.position === 1
       ? 3
       : telemetry.position === 2
       ? 2
@@ -516,6 +596,20 @@ export function RaceHud({
     if (pos === 2) return '2ND';
     if (pos === 3) return '3RD';
     return `${pos}TH`;
+  };
+
+  const weatherLabel: Record<ActiveWeather, string> = {
+    clear: 'CLEAR',
+    rain: 'RAIN',
+    snow: 'SNOW',
+    mist: 'MIST',
+  };
+
+  const weatherGripHint: Record<ActiveWeather, string> = {
+    clear: 'DRY GRIP 100%',
+    mist: 'DAMP MIST · LOW VISIBILITY',
+    rain: 'WET ASPHALT · SLIPPERY',
+    snow: 'SNOWY SURFACE · LOW GRIP',
   };
 
   const confettiPieces = [
@@ -552,6 +646,8 @@ export function RaceHud({
   const objectiveHeadline =
     mode === 'time-trial'
       ? `SET THE FASTEST ${totalLaps}-LAP TRACK RECORD`
+      : isLastManStanding
+      ? 'SURVIVE 15 CARS — LAST MAN STANDING'
       : mode === 'multiplayer'
       ? `FINISH TOP 3 OVER ${totalLaps} ${lapLabel.toUpperCase()}`
       : `FINISH TOP 3 — BEAT ${rivalCount} RIVALS`;
@@ -559,6 +655,8 @@ export function RaceHud({
   const objectiveRule =
     mode === 'time-trial'
       ? `Complete ${totalLaps} clean ${lapLabel.toLowerCase()} in the shortest total time to set a new personal best.`
+      : isLastManStanding
+      ? '15 cars battle across 14 elimination laps. At the end of every lap, the car in last place is eliminated until only 1 final survivor remains!'
       : `Finish 1st, 2nd, or 3rd to win! If you are in 2nd or 3rd when the leader finishes, keep driving to cross the finish line — 4th or lower loses!`;
 
   return (
@@ -573,13 +671,25 @@ export function RaceHud({
         <div className="flex flex-col items-start gap-1.5">
           <div className="flex flex-col gap-1">
             {mode !== 'time-trial' && (
-              <div className="-skew-x-14 bg-[#0D1626]/90 border border-white/15 px-3.5 py-1 flex items-baseline gap-3 min-w-[116px] sm:min-w-[132px]">
-                <span className="skew-x-14 font-display italic font-bold text-sm sm:text-base text-[#FFD014]">
-                  Pos
+              <div
+                className={`-skew-x-14 border px-3.5 py-1 flex items-baseline gap-3 min-w-[116px] sm:min-w-[132px] ${
+                  inDangerZone
+                    ? 'bg-[#3A0C12]/92 border-[#FF4D55]'
+                    : 'bg-[#0D1626]/90 border-white/15'
+                }`}
+              >
+                <span
+                  className={`skew-x-14 font-display italic font-bold text-sm sm:text-base ${
+                    inDangerZone ? 'text-[#FF6B73]' : 'text-[#FFD014]'
+                  }`}
+                >
+                  {inDangerZone ? 'KO RISK' : 'Pos'}
                 </span>
                 <span className="skew-x-14 font-display italic font-black text-lg sm:text-xl text-white font-mono-tabular leading-none ml-auto">
                   {telemetry.position}
-                  <span className="text-xs sm:text-sm text-slate-300 font-bold">/{telemetry.totalRacers}</span>
+                  <span className="text-xs sm:text-sm text-slate-300 font-bold">
+                    /{isLastManStanding ? aliveRacers : telemetry.totalRacers}
+                  </span>
                 </span>
               </div>
             )}
@@ -593,32 +703,69 @@ export function RaceHud({
                 <span className="text-xs sm:text-sm text-slate-300 font-bold">/{telemetry.totalLaps}</span>
               </span>
             </div>
+
+            {isLastManStanding && (
+              <div className="-skew-x-14 bg-[#260D14]/90 border border-[#E5252B]/65 px-3.5 py-0.5 flex items-center gap-2 min-w-[116px] sm:min-w-[132px]">
+                <Skull className="w-3.5 h-3.5 text-[#FF5C66] skew-x-14 shrink-0" />
+                <span className="skew-x-14 font-display italic font-bold text-xs text-red-200">
+                  Alive
+                </span>
+                <span className="skew-x-14 font-display italic font-black text-sm text-[#FFD014] font-mono-tabular ml-auto">
+                  {aliveRacers}/{telemetry.totalRacers}
+                </span>
+              </div>
+            )}
           </div>
 
-          {/* Live Compact Standings Strip (exact reference highlight for player row!) */}
+          {/* Live Compact Standings Strip (supports 15-car Last Man Standing with KO danger-zone + eliminated rows!) */}
           {mode !== 'time-trial' && telemetry.standings.length > 1 && (
-            <div className="hidden sm:flex flex-col w-[178px] rounded-md bg-[#0C1422]/82 border border-white/12 overflow-hidden divide-y divide-white/[0.07]">
-              {telemetry.standings.slice(0, 6).map((row) => {
+            <div
+              className={`hidden sm:flex flex-col w-[188px] rounded-md bg-[#0C1422]/84 border border-white/12 divide-y divide-white/[0.07] ${
+                isLastManStanding ? 'max-h-[168px] overflow-y-auto custom-scroll' : 'overflow-hidden'
+              }`}
+            >
+              {(isLastManStanding ? telemetry.standings : telemetry.standings.slice(0, 6)).map((row) => {
                 const deltaProgress = playerProgress - row.totalProgress;
                 const estGapSec = deltaProgress * 46;
-                const gapText = row.isPlayer
+                const isEliminated = Boolean(row.eliminated);
+                const isKnockoutZone =
+                  isLastManStanding && !isEliminated && aliveRacers > 1 && row.position === aliveRacers;
+                const gapText = isEliminated
+                  ? `OUT L${row.eliminatedLap ?? ''}`
+                  : isKnockoutZone
+                  ? 'KO ZONE'
+                  : row.isPlayer
                   ? ''
-                  : `${estGapSec >= 0 ? '+' : ''}${estGapSec.toFixed(2)}s`;
+                  : `${estGapSec >= 0 ? '+' : ''}${estGapSec.toFixed(1)}s`;
                 return (
                   <div
                     key={row.id}
-                    className={`flex items-center justify-between px-2 py-0.5 text-[11px] font-display italic ${
-                      row.isPlayer
-                        ? 'bg-[#FFD014] text-[#0B1220] font-black'
+                    className={`flex items-center justify-between px-2 py-0.5 text-[11px] font-display italic shrink-0 ${
+                      isEliminated
+                        ? 'bg-[#090F1B]/70 text-slate-500 line-through opacity-65'
+                        : row.isPlayer
+                        ? isKnockoutZone
+                          ? 'bg-[#E5252B] text-white font-black'
+                          : 'bg-[#FFD014] text-[#0B1220] font-black'
+                        : isKnockoutZone
+                        ? 'bg-[#3A0C12]/90 text-red-200 font-bold'
                         : 'text-slate-100 font-semibold'
                     }`}
                   >
                     <div className="flex items-center gap-1.5 min-w-0">
-                      <span className="w-3 font-mono-tabular text-[10px] opacity-85">{row.position}</span>
+                      <span className="w-4 font-mono-tabular text-[10px] opacity-85">{row.position}</span>
                       <span className="truncate">{row.name}</span>
                     </div>
                     {gapText && (
-                      <span className="font-mono-tabular text-[10px] text-slate-300 shrink-0 ml-1">
+                      <span
+                        className={`font-mono-tabular text-[9px] shrink-0 ml-1 ${
+                          isEliminated
+                            ? 'text-slate-500'
+                            : isKnockoutZone
+                            ? 'text-[#FFD014] font-black'
+                            : 'text-slate-300'
+                        }`}
+                      >
                         {gapText}
                       </span>
                     )}
@@ -713,6 +860,7 @@ export function RaceHud({
                 strokeWidth="1.2"
               />
               {telemetry.minimapCars.map((mc) => {
+                if (mc.eliminated) return null;
                 const { sx, sy } = minimap.toSvg(mc.x, mc.z);
                 return mc.isPlayer ? (
                   <polygon
@@ -727,10 +875,10 @@ export function RaceHud({
                     key={mc.id}
                     cx={sx}
                     cy={sy}
-                    r={2.8}
+                    r={2.5}
                     fill="#FFD014"
                     stroke="#0B1220"
-                    strokeWidth="1"
+                    strokeWidth="0.9"
                   />
                 );
               })}
@@ -740,6 +888,41 @@ export function RaceHud({
           {/* Compact Utility Stack + Circular Settings/Pause Gear */}
           <div className="pointer-events-auto flex flex-col items-end gap-1.5">
             <div className="flex items-center gap-1.5">
+              {/* Live Climate Switcher Button (V) */}
+              <button
+                type="button"
+                onClick={onCycleClimate}
+                title={`Change Track Climate (V) — ${
+                  climateMode === 'dynamic' ? `Dynamic (${weatherLabel[activeWeather]})` : weatherLabel[activeWeather]
+                }`}
+                className={`h-9 px-2.5 -skew-x-10 border text-[11px] font-display italic font-black transition-colors ${
+                  activeWeather === 'rain'
+                    ? 'bg-sky-500/25 border-sky-400/75 text-sky-100 hover:bg-sky-500/35'
+                    : activeWeather === 'snow'
+                    ? 'bg-cyan-400/20 border-cyan-200/75 text-cyan-50 hover:bg-cyan-400/30'
+                    : activeWeather === 'mist'
+                    ? 'bg-slate-400/22 border-slate-300/65 text-slate-100 hover:bg-slate-400/32'
+                    : 'bg-[#0D1626]/90 border-white/18 text-white hover:bg-[#192842]'
+                }`}
+              >
+                <span className="skew-x-10 flex items-center gap-1 whitespace-nowrap">
+                  {activeWeather === 'rain' ? (
+                    <CloudRain className="w-3.5 h-3.5 text-sky-300 shrink-0" />
+                  ) : activeWeather === 'snow' ? (
+                    <Snowflake className="w-3.5 h-3.5 text-cyan-200 shrink-0" />
+                  ) : activeWeather === 'mist' ? (
+                    <CloudFog className="w-3.5 h-3.5 text-slate-200 shrink-0" />
+                  ) : climateMode === 'dynamic' ? (
+                    <CloudSun className="w-3.5 h-3.5 text-[#FFD014] shrink-0" />
+                  ) : (
+                    <Sun className="w-3.5 h-3.5 text-[#FFD014] shrink-0" />
+                  )}
+                  <span>{weatherLabel[activeWeather]}</span>
+                  {climateMode === 'dynamic' && (
+                    <span className="text-[9px] text-[#FFD014] opacity-90">AUTO</span>
+                  )}
+                </span>
+              </button>
               <button
                 type="button"
                 onClick={cycleSteeringMode}
@@ -850,7 +1033,15 @@ export function RaceHud({
               </div>
               <div className="-skew-x-12 px-2.5 py-0.5 bg-[#15243E] border border-[#FFD014]/50 text-[#FFD014] font-display italic font-black text-[10px] sm:text-xs shrink-0">
                 <span className="block skew-x-12">
-                  {totalLaps} {lapLabel.toUpperCase()} · {mode === 'time-trial' ? 'TIME TRIAL' : mode === 'multiplayer' ? 'ONLINE' : 'QUICK RACE'}
+                  {isLastManStanding
+                    ? `15 CARS · ${totalLaps} LAPS · KNOCKOUT`
+                    : `${totalLaps} ${lapLabel.toUpperCase()} · ${
+                        mode === 'time-trial'
+                          ? 'TIME TRIAL'
+                          : mode === 'multiplayer'
+                          ? 'ONLINE'
+                          : 'QUICK RACE'
+                      }`}
                 </span>
               </div>
             </div>
@@ -862,6 +1053,8 @@ export function RaceHud({
                 <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-lg bg-[#FFD014] text-[#0B1220] flex items-center justify-center shrink-0 shadow-[0_0_16px_rgba(255,208,20,0.4)]">
                   {mode === 'time-trial' ? (
                     <Timer className="w-5 h-5 sm:w-6 sm:h-6" />
+                  ) : isLastManStanding ? (
+                    <Skull className="w-5 h-5 sm:w-6 sm:h-6" />
                   ) : (
                     <Trophy className="w-5 h-5 sm:w-6 sm:h-6" />
                   )}
@@ -884,21 +1077,29 @@ export function RaceHud({
                 <div className="p-2.5 sm:p-3 rounded-lg bg-[#0F1B2F] border border-white/14">
                   <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] font-display italic font-black text-[#FFD014]">
                     <Flag className="w-3.5 h-3.5 shrink-0" />
-                    <span>TRACK CHALLENGE</span>
+                    <span>TRACK &amp; CLIMATE</span>
                   </div>
                   <p className="text-[11px] sm:text-xs text-slate-200 mt-1 leading-snug">
-                    {trackObjective.challenge}
+                    {trackObjective.challenge} Weather: {climateMode === 'dynamic' ? 'Dynamic (Rain / Mist / Snow)' : weatherLabel[activeWeather]}.
                   </p>
                 </div>
 
                 <div className="p-2.5 sm:p-3 rounded-lg bg-[#0F1B2F] border border-white/14">
                   <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] font-display italic font-black text-[#FFD014]">
                     <Coins className="w-3.5 h-3.5 shrink-0" />
-                    <span>{mode === 'time-trial' ? 'REWARD TARGET' : 'PODIUM REWARDS'}</span>
+                    <span>
+                      {mode === 'time-trial'
+                        ? 'REWARD TARGET'
+                        : isLastManStanding
+                        ? 'SURVIVOR REWARDS'
+                        : 'PODIUM REWARDS'}
+                    </span>
                   </div>
                   <p className="text-[11px] sm:text-xs text-slate-200 mt-1 leading-snug font-medium">
                     {mode === 'time-trial'
                       ? 'Beat your best time to post a top rank on the Global Leaderboard.'
+                      : isLastManStanding
+                      ? 'Last Car Standing (1st): 1,000 Coins · 2nd: 500 · 3rd: 250 Coins'
                       : '1st: 500 · 2nd: 300 · 3rd: 150 Coins (Top 3 win the level)'}
                   </p>
                 </div>
@@ -957,10 +1158,49 @@ export function RaceHud({
         </div>
       )}
 
-      {/* LIVE LAP CONTINUATION & LEADER-FINISHED BANNERS (Non-blocking center-top cues!) */}
+      {/* LIVE LAP CONTINUATION, KNOCKOUT & CLIMATE SHIFT BANNERS (Non-blocking center-top cues!) */}
       {telemetry.countdown <= 0 && !telemetry.finished && !paused && !showObjective && (
         <div className="self-center flex flex-col items-center gap-2 pointer-events-none">
-          {telemetry.leaderFinished && mode !== 'time-trial' && telemetry.position <= 3 && (
+          {elimBanner && isLastManStanding && (
+            <div className="-skew-x-12 px-5 py-1.5 bg-gradient-to-r from-[#881337]/95 via-[#E5252B]/95 to-[#881337]/95 border-2 border-[#FFD014] shadow-[0_8px_28px_rgba(229,37,43,0.6)]">
+              <div className="skew-x-12 flex items-center gap-2 text-xs sm:text-sm font-display italic font-black text-white tracking-wide whitespace-nowrap">
+                <Skull className="w-4 h-4 text-[#FFD014] shrink-0" />
+                <span>
+                  LAP {elimBanner.lap} KNOCKOUT: {elimBanner.name.toUpperCase()} ELIMINATED (#{elimBanner.rank}) ·{' '}
+                  <span className="text-[#FFD014]">{aliveRacers} LEFT</span>
+                </span>
+              </div>
+            </div>
+          )}
+
+          {weatherBanner && (
+            <div className="-skew-x-12 px-4 py-1 bg-[#0B1424]/92 border border-sky-400/75 shadow-[0_6px_20px_rgba(56,189,248,0.3)]">
+              <div className="skew-x-12 flex items-center gap-2 text-[11px] sm:text-xs font-display italic font-black text-white tracking-wider whitespace-nowrap">
+                {weatherBanner === 'rain' ? (
+                  <CloudRain className="w-3.5 h-3.5 text-sky-300 shrink-0" />
+                ) : weatherBanner === 'snow' ? (
+                  <Snowflake className="w-3.5 h-3.5 text-cyan-200 shrink-0" />
+                ) : weatherBanner === 'mist' ? (
+                  <CloudFog className="w-3.5 h-3.5 text-slate-200 shrink-0" />
+                ) : (
+                  <Sun className="w-3.5 h-3.5 text-[#FFD014] shrink-0" />
+                )}
+                <span className="text-sky-300">CLIMATE SHIFT: {weatherLabel[weatherBanner]}</span>
+                <span className="text-slate-300">· {weatherGripHint[weatherBanner]}</span>
+              </div>
+            </div>
+          )}
+
+          {inDangerZone && !elimBanner && (
+            <div className="-skew-x-12 px-4 py-1 bg-[#3A0C12]/92 border border-[#FF4D55] shadow-md">
+              <div className="skew-x-12 flex items-center gap-1.5 text-[11px] sm:text-xs font-display italic font-black text-[#FFD014] tracking-wide whitespace-nowrap">
+                <Skull className="w-3.5 h-3.5 text-[#FF5C66] shrink-0" />
+                <span>KNOCKOUT ZONE — OVERTAKE BEFORE LAP END!</span>
+              </div>
+            </div>
+          )}
+
+          {telemetry.leaderFinished && !isLastManStanding && mode !== 'time-trial' && telemetry.position <= 3 && (
             <div className="-skew-x-12 px-5 py-1.5 bg-[#0B1424]/94 border-2 border-[#FFD014] shadow-[0_8px_24px_rgba(255,208,20,0.35)]">
               <div className="skew-x-12 flex items-center gap-2 text-xs sm:text-sm font-display italic font-black text-[#FFD014] tracking-wide whitespace-nowrap">
                 <Flag className="w-4 h-4 shrink-0" />
@@ -987,9 +1227,15 @@ export function RaceHud({
                 </div>
                 <div className="text-[10px] sm:text-xs text-white tracking-widest mt-0.5">
                   {lapBanner.isStart
-                    ? 'GREEN FLAG — GO!'
+                    ? isLastManStanding
+                      ? '15 CARS — DON’T FINISH LAST!'
+                      : 'GREEN FLAG — GO!'
                     : lapBanner.isFinal
-                    ? 'LAST LAP — PUSH TO THE FINISH LINE!'
+                    ? isLastManStanding
+                      ? 'FINAL DUEL — LAST CAR STANDING WINS!'
+                      : 'LAST LAP — PUSH TO THE FINISH LINE!'
+                    : isLastManStanding
+                    ? `${aliveRacers} CARS LEFT — AVOID LAST PLACE!`
                     : `CONTINUING LAP ${lapBanner.lap}`}
                 </div>
               </div>
@@ -1279,14 +1525,16 @@ export function RaceHud({
           ) : (
             <div className="hidden md:flex items-center gap-2 px-3 py-1.5 -skew-x-10 bg-[#0D1626]/82 border border-white/12 text-[11px] text-slate-300">
               <div className="skew-x-10 flex items-center gap-2">
-                <span>WASD / Arrows / Joystick</span>
+                <span>WASD / Arrows</span>
                 <span aria-hidden="true">·</span>
-                <span className="text-[#FFD014] font-bold">Auto-Drift on Turns</span>
+                <span className="text-[#FFD014] font-bold">Space / Brake+Steer: Drift</span>
                 <span aria-hidden="true">·</span>
-                <span>Shift / B: Nitro</span>
+                <span>Shift: Nitro</span>
+                <span aria-hidden="true">·</span>
+                <span>V: Climate</span>
                 <span aria-hidden="true">·</span>
                 {transmissionMode === 'manual' ? (
-                  <span className="text-[#FFD014] font-bold">Q/E or LB/RB: Gear</span>
+                  <span className="text-[#FFD014] font-bold">Q/E: Gear</span>
                 ) : (
                   <span>T: Auto/Man</span>
                 )}
@@ -1635,6 +1883,27 @@ export function RaceHud({
                 </div>
               </div>
 
+              {/* Track Climate Quick Switch inside Pause Menu */}
+              <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-md bg-[#111D32] border border-white/14">
+                <div className="text-left">
+                  <div className="text-[9px] font-display italic font-black text-[#FFD014] tracking-wider">
+                    TRACK CLIMATE
+                  </div>
+                  <div className="text-xs font-display italic font-bold text-white">
+                    {climateMode === 'dynamic'
+                      ? `Dynamic (${weatherLabel[activeWeather]})`
+                      : weatherLabel[activeWeather]}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={onCycleClimate}
+                  className="h-8 px-3 -skew-x-10 bg-[#1B2E4E] hover:bg-[#26406B] border border-sky-400/55 text-xs font-display italic font-black text-sky-200 transition-colors"
+                >
+                  <span className="block skew-x-10">SWITCH WEATHER</span>
+                </button>
+              </div>
+
               <div className="flex flex-col gap-2.5 pt-1">
                 <button
                   type="button"
@@ -1795,25 +2064,33 @@ export function RaceHud({
                   </div>
                 )}
 
-                {/* Bold Skewed Main Ribbon: Yellow LEVEL COMPLETE vs Crimson YOU LOST */}
+                {/* Bold Skewed Main Ribbon: Yellow LEVEL COMPLETE / LAST MAN STANDING vs Crimson YOU LOST / ELIMINATED */}
                 {isWinner ? (
                   <div className="relative z-20 -skew-x-14 bg-gradient-to-b from-[#FFE142] to-[#F5B800] border-2 border-[#FFF3A1] px-5 lg:px-10 py-0.5 lg:py-2 rounded-md shadow-[0_8px_24px_rgba(0,0,0,0.6)]">
                     <div className="skew-x-14 text-center font-display italic font-black text-[#0B1220] leading-[0.95] tracking-tight">
-                      <div className="text-sm lg:text-3xl">LEVEL</div>
-                      <div className="text-base lg:text-4xl">COMPLETE</div>
+                      <div className="text-sm lg:text-3xl">
+                        {isLastManStanding ? 'LAST MAN' : 'LEVEL'}
+                      </div>
+                      <div className="text-base lg:text-4xl">
+                        {isLastManStanding ? 'STANDING!' : 'COMPLETE'}
+                      </div>
                     </div>
                   </div>
                 ) : (
                   <div className="relative z-20 -skew-x-14 bg-gradient-to-b from-[#F43F5E] to-[#B91C1C] border-2 border-[#FDA4AF] px-6 lg:px-12 py-0.5 lg:py-2 rounded-md shadow-[0_8px_28px_rgba(185,28,28,0.65)]">
                     <div className="skew-x-14 text-center font-display italic font-black text-white leading-[0.95] tracking-tight">
-                      <div className="text-xs lg:text-2xl text-red-100">RACE FAILED</div>
-                      <div className="text-base lg:text-4xl">YOU LOST</div>
+                      <div className="text-xs lg:text-2xl text-red-100">
+                        {isLastManStanding ? 'KNOCKED OUT' : 'RACE FAILED'}
+                      </div>
+                      <div className="text-base lg:text-4xl">
+                        {isLastManStanding ? 'ELIMINATED' : 'YOU LOST'}
+                      </div>
                     </div>
                   </div>
                 )}
               </div>
 
-              {/* Sub-badge: Podium Victory Status vs Loss Reason */}
+              {/* Sub-badge: Podium Victory Status vs Loss / Elimination Reason */}
               <div
                 className={`mt-1 lg:mt-2 -skew-x-12 px-3 py-0.5 text-[10px] lg:text-xs font-display italic font-black tracking-wide border ${
                   isWinner
@@ -1824,6 +2101,10 @@ export function RaceHud({
                 <span className="block skew-x-12">
                   {mode === 'time-trial'
                     ? 'TIME TRIAL COMPLETED'
+                    : isLastManStanding
+                    ? isWinner
+                      ? `1ST OF ${telemetry.totalRacers} — FINAL SURVIVOR!`
+                      : `ELIMINATED IN ${formatOrdinal(telemetry.position)} OF ${telemetry.totalRacers} (LAP ${telemetry.lap})`
                     : isWinner
                     ? telemetry.position === 1
                       ? '1ST PLACE VICTORY!'

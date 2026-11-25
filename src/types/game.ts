@@ -21,7 +21,9 @@ export type TrackId =
   | 'racing-track'
   | 'gokart-track';
 export type TimeOfDay = 'morning' | 'evening' | 'night';
-export type GameMode = 'quick-race' | 'multiplayer' | 'time-trial';
+export type ClimateMode = 'dynamic' | 'clear' | 'rain' | 'snow' | 'mist';
+export type ActiveWeather = 'clear' | 'rain' | 'snow' | 'mist';
+export type GameMode = 'quick-race' | 'last-man-standing' | 'multiplayer' | 'time-trial';
 export type PlatformType = 'Mobile iOS' | 'Mobile Android' | 'Tablet' | 'Desktop';
 export type CameraMode = 'chase' | 'far-chase' | 'hood' | 'bumper';
 export type TransmissionMode = 'auto' | 'manual';
@@ -157,6 +159,18 @@ export interface RaceTelemetry {
   countdown: number; // 3,2,1,0,-1 (racing)
   finished: boolean;
   leaderFinished?: boolean;
+  aliveRacers?: number;
+  eliminatedCount?: number;
+  playerEliminated?: boolean;
+  lastEliminated?: {
+    name: string;
+    lap: number;
+    rank: number;
+    isPlayer: boolean;
+    timestamp: number;
+  } | null;
+  activeWeather?: ActiveWeather;
+  climateMode?: ClimateMode;
   cameraMode: CameraMode;
   minimapCars: Array<{
     id: string;
@@ -164,6 +178,7 @@ export interface RaceTelemetry {
     z: number;
     color: string;
     isPlayer: boolean;
+    eliminated?: boolean;
   }>;
   standings: Array<{
     id: string;
@@ -179,6 +194,8 @@ export interface RaceTelemetry {
     topSpeedKmh: number;
     isPlayer: boolean;
     color: string;
+    eliminated?: boolean;
+    eliminatedLap?: number;
   }>;
 }
 
@@ -190,6 +207,12 @@ export const RACE_PRIZE_COINS: Record<1 | 2 | 3, number> = {
 
 export function getRacePrizeCoins(position: number, mode: GameMode): number {
   if (mode === 'time-trial') return 0;
+  if (mode === 'last-man-standing') {
+    if (position === 1) return 1000;
+    if (position === 2) return 500;
+    if (position === 3) return 250;
+    return 0;
+  }
   if (position === 1) return RACE_PRIZE_COINS[1];
   if (position === 2) return RACE_PRIZE_COINS[2];
   if (position === 3) return RACE_PRIZE_COINS[3];

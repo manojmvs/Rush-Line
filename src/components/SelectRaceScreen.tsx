@@ -4,6 +4,9 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  CloudFog,
+  CloudRain,
+  CloudSun,
   Coins,
   Disc,
   Flag,
@@ -14,6 +17,7 @@ import {
   Repeat,
   Sliders,
   Smartphone,
+  Snowflake,
   Sun,
   Sunset,
   Unlock,
@@ -25,6 +29,7 @@ import {
   TRACK_ORDER,
   TRACK_SPECS,
   type ChassisId,
+  type ClimateMode,
   type GameMode,
   type TimeOfDay,
   type TrackId,
@@ -41,12 +46,14 @@ interface SelectRaceScreenProps {
   selectedTrack: TrackId;
   selectedMode: GameMode;
   timeOfDay: TimeOfDay;
+  climateMode: ClimateMode;
   laps: number;
   onSelectChassis: (chassisId: ChassisId) => void;
   onUnlockChassis: (chassisId: ChassisId) => void;
   onSelectTrack: (trackId: TrackId) => void;
   onSelectMode: (mode: GameMode) => void;
   onSelectTimeOfDay: (tod: TimeOfDay) => void;
+  onSelectClimateMode: (climate: ClimateMode) => void;
   onSelectLaps: (laps: number) => void;
   onBack: () => void;
   onOpenGarage: () => void;
@@ -71,12 +78,14 @@ export function SelectRaceScreen({
   selectedTrack,
   selectedMode,
   timeOfDay,
+  climateMode,
   laps,
   onSelectChassis,
   onUnlockChassis,
   onSelectTrack,
   onSelectMode,
   onSelectTimeOfDay,
+  onSelectClimateMode,
   onSelectLaps,
   onBack,
   onOpenGarage,
@@ -298,7 +307,9 @@ export function SelectRaceScreen({
               </span>
             </div>
             <span className="text-[10px] lg:text-[11px] text-slate-400 font-mono-tabular">
-              1st: 500 · 2nd: 300 · 3rd: 100
+              {selectedMode === 'last-man-standing'
+                ? '15 Cars · Last Car Eliminated Each Lap · 1st: 1,000'
+                : '1st: 500 · 2nd: 300 · 3rd: 150'}
             </span>
           </div>
 
@@ -347,7 +358,7 @@ export function SelectRaceScreen({
 
       {/* BOTTOM BAR: RACE MODE | TIME ZONE | LAPS + Big Yellow START RACE >> CTA */}
       <div className="shrink-0 flex flex-wrap items-center justify-between gap-2.5 bg-[#0D1524]/92 border border-white/14 rounded-xl px-3 py-2">
-        <div className="flex flex-wrap items-center gap-3 sm:gap-5">
+        <div className="flex flex-wrap items-center gap-3 sm:gap-4">
           {/* RACE MODE */}
           <div className="flex items-center gap-2">
             <Flag className="w-4 h-4 text-[#FFD014] shrink-0" />
@@ -362,6 +373,7 @@ export function SelectRaceScreen({
                 className="h-7 px-2 rounded bg-[#162338] border border-white/18 text-xs font-display italic font-bold text-white focus:outline-none focus:border-[#FFD014]"
               >
                 <option value="quick-race">Quick Race</option>
+                <option value="last-man-standing">Last Man Standing (15 Cars)</option>
                 <option value="time-trial">Time Trial</option>
                 <option value="multiplayer">Multiplayer</option>
               </select>
@@ -394,7 +406,39 @@ export function SelectRaceScreen({
             </div>
           </div>
 
-          {/* LAPS DROPDOWN */}
+          {/* CLIMATE (Dynamic / Rain / Snow / Mist / Clear) */}
+          <div className="flex items-center gap-2">
+            {climateMode === 'rain' ? (
+              <CloudRain className="w-4 h-4 text-sky-400 shrink-0" />
+            ) : climateMode === 'snow' ? (
+              <Snowflake className="w-4 h-4 text-cyan-200 shrink-0" />
+            ) : climateMode === 'mist' ? (
+              <CloudFog className="w-4 h-4 text-slate-300 shrink-0" />
+            ) : climateMode === 'clear' ? (
+              <Sun className="w-4 h-4 text-[#FFD014] shrink-0" />
+            ) : (
+              <CloudSun className="w-4 h-4 text-[#FFD014] shrink-0" />
+            )}
+            <div>
+              <div className="text-[9px] font-display italic font-bold text-slate-400 leading-none mb-1">
+                CLIMATE
+              </div>
+              <select
+                aria-label="Track Climate"
+                value={climateMode}
+                onChange={(e) => onSelectClimateMode(e.target.value as ClimateMode)}
+                className="h-7 px-2 rounded bg-[#162338] border border-white/18 text-xs font-display italic font-bold text-white focus:outline-none focus:border-[#FFD014]"
+              >
+                <option value="dynamic">Dynamic (Rain/Snow/Mist)</option>
+                <option value="rain">Rain</option>
+                <option value="snow">Snow</option>
+                <option value="mist">Mist</option>
+                <option value="clear">Clear</option>
+              </select>
+            </div>
+          </div>
+
+          {/* LAPS DROPDOWN (Fixed to 14 Knockout Laps for Last Man Standing) */}
           <div className="flex items-center gap-2">
             <Repeat className="w-4 h-4 text-[#FFD014] shrink-0" />
             <div>
@@ -402,24 +446,30 @@ export function SelectRaceScreen({
                 htmlFor="select-race-laps"
                 className="block text-[9px] font-display italic font-bold text-slate-400 leading-none mb-1"
               >
-                LAPS
+                {selectedMode === 'last-man-standing' ? 'KNOCKOUT' : 'LAPS'}
               </label>
-              <div className="relative">
-                <select
-                  id="select-race-laps"
-                  aria-label="Select Number of Laps"
-                  value={laps}
-                  onChange={(e) => onSelectLaps(Number(e.target.value))}
-                  className="appearance-none h-7 pl-2.5 pr-7 rounded bg-[#162338] border border-[#FFD014]/50 text-xs font-display italic font-black text-white focus:outline-none focus:border-[#FFD014] cursor-pointer"
-                >
-                  {[1, 2, 3, 4, 5, 7, 10].map((n) => (
-                    <option key={n} value={n} className="bg-[#0B1424] text-white">
-                      {n} {n === 1 ? 'Lap' : 'Laps'}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#FFD014]" />
-              </div>
+              {selectedMode === 'last-man-standing' ? (
+                <div className="h-7 px-2.5 rounded bg-[#2A1016] border border-[#E5252B]/65 text-xs font-display italic font-black text-[#FFD014] flex items-center whitespace-nowrap">
+                  15 Cars · 14 Laps
+                </div>
+              ) : (
+                <div className="relative">
+                  <select
+                    id="select-race-laps"
+                    aria-label="Select Number of Laps"
+                    value={laps}
+                    onChange={(e) => onSelectLaps(Number(e.target.value))}
+                    className="appearance-none h-7 pl-2.5 pr-7 rounded bg-[#162338] border border-[#FFD014]/50 text-xs font-display italic font-black text-white focus:outline-none focus:border-[#FFD014] cursor-pointer"
+                  >
+                    {[1, 2, 3, 4, 5, 7, 10].map((n) => (
+                      <option key={n} value={n} className="bg-[#0B1424] text-white">
+                        {n} {n === 1 ? 'Lap' : 'Laps'}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#FFD014]" />
+                </div>
+              )}
             </div>
           </div>
         </div>

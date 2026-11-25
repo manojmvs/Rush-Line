@@ -51,6 +51,7 @@ import {
   getRacePrizeCoins,
   type CameraMode,
   type ChassisId,
+  type ClimateMode,
   type GameMode,
   type PerformanceMode,
   type RaceTelemetry,
@@ -72,10 +73,12 @@ const STORAGE_UNLOCKED_KEY = 'apex-circuit-unlocked-v1';
 const STORAGE_TRANSMISSION_KEY = 'apex-circuit-transmission-v1';
 const STORAGE_STEERING_KEY = 'apex-circuit-steering-v1';
 const STORAGE_TIME_KEY = 'apex-circuit-time-v1';
+const STORAGE_CLIMATE_KEY = 'apex-circuit-climate-v1';
 const STORAGE_BEST_TIMES_KEY = 'apex-circuit-best-times-v1';
 const STORAGE_PERF_KEY = 'apex-circuit-perf-v1';
 
 const CAMERA_ORDER: CameraMode[] = ['chase', 'far-chase', 'hood', 'bumper'];
+const CLIMATE_ORDER: ClimateMode[] = ['dynamic', 'rain', 'snow', 'mist', 'clear'];
 
 function loadBestTimes(): Partial<Record<TrackId, number>> {
   try {
@@ -128,6 +131,24 @@ function loadTimeOfDay(): TimeOfDay {
     // ignore
   }
   return 'morning';
+}
+
+function loadClimateMode(): ClimateMode {
+  try {
+    const saved = localStorage.getItem(STORAGE_CLIMATE_KEY);
+    if (
+      saved === 'dynamic' ||
+      saved === 'clear' ||
+      saved === 'rain' ||
+      saved === 'snow' ||
+      saved === 'mist'
+    ) {
+      return saved;
+    }
+  } catch {
+    // ignore
+  }
+  return 'dynamic';
 }
 
 function loadUnlockedChassis(): ChassisId[] {
@@ -232,6 +253,7 @@ export default function App() {
   const [previewVehicle, setPreviewVehicle] = useState<VehicleConfig | null>(null);
   const [selectedTrack, setSelectedTrack] = useState<TrackId>('offroad-track');
   const [timeOfDay, setTimeOfDay] = useState<TimeOfDay>(loadTimeOfDay);
+  const [climateMode, setClimateMode] = useState<ClimateMode>(loadClimateMode);
   const [selectedMode, setSelectedMode] = useState<GameMode>('quick-race');
   const [selectedLaps, setSelectedLaps] = useState<number>(3);
   const [activeScreen, setActiveScreen] = useState<MenuScreen>('intro');
@@ -439,6 +461,18 @@ export default function App() {
 
   useEffect(() => {
     try {
+      localStorage.setItem(STORAGE_CLIMATE_KEY, climateMode);
+    } catch {
+      // ignore
+    }
+  }, [climateMode]);
+
+  const handleCycleClimate = useCallback(() => {
+    setClimateMode((prev) => CLIMATE_ORDER[(CLIMATE_ORDER.indexOf(prev) + 1) % CLIMATE_ORDER.length]);
+  }, []);
+
+  useEffect(() => {
+    try {
       localStorage.setItem(STORAGE_BEST_TIMES_KEY, JSON.stringify(bestTimes));
     } catch {
       // ignore
@@ -458,18 +492,23 @@ export default function App() {
     };
   }, []);
 
-  // Sync game music: upbeat Intro theme in menus, Victory fanfare for 1st/2nd win, Defeat sting when lost, off while driving
+  // Sync game music: upbeat Intro theme in menus, Victory fanfare on win, Defeat sting on loss/elimination
   useEffect(() => {
     gameMusic.setMuted(muted);
     if (inRace && telemetry.finished) {
-      const wonRace = selectedMode === 'time-trial' || telemetry.position <= 3;
+      const wonRace =
+        selectedMode === 'time-trial'
+          ? true
+          : selectedMode === 'last-man-standing'
+          ? !telemetry.playerEliminated && telemetry.position === 1
+          : telemetry.position <= 3;
       gameMusic.setMode(wonRace ? 'victory' : 'defeat');
     } else if (!inRace) {
       gameMusic.setMode('intro');
     } else {
       gameMusic.setMode('off');
     }
-  }, [inRace, telemetry.finished, telemetry.position, selectedMode, muted]);
+  }, [inRace, telemetry.finished, telemetry.position, telemetry.playerEliminated, selectedMode, muted]);
 
   // Clear locked car preview when returning to intro
   useEffect(() => {
@@ -597,6 +636,8 @@ export default function App() {
         }
         if (e.code === 'KeyC') {
           setCameraMode((prev) => CAMERA_ORDER[(CAMERA_ORDER.indexOf(prev) + 1) % CAMERA_ORDER.length]);
+        } else if (e.code === 'KeyV') {
+          handleCycleClimate();
         } else if (e.code === 'KeyT') {
           setTransmissionMode((prev) => (prev === 'auto' ? 'manual' : 'auto'));
         } else if (e.code === 'Escape' || e.code === 'KeyP') {
@@ -608,7 +649,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [inRace, showRaceObjective]);
+  }, [inRace, showRaceObjective, handleCycleClimate]);
 
   const handleSelectChassis = useCallback(
     (chassisId: ChassisId) => {
@@ -704,6 +745,9 @@ export default function App() {
       if (steeringMode === 'gyro') {
         void requestGyroPermission();
       }
+      const effectiveLaps = modeToRun === 'last-man-standing' ? 14 : selectedLaps;
+      const effectiveRacers =
+        modeToRun === 'last-man-standing' ? 15 : modeToRun === 'time-trial' ? 1 : 6;
       setPendingRaceMode(null);
       setTransmissionMode(chosenTransmission);
       setPreviewVehicle(null);
@@ -714,11 +758,21 @@ export default function App() {
       setLastEarnedCoins(0);
       setIsNewBest(false);
       setShowPostRaceLeaderboard(false);
-      setTelemetry({ ...INITIAL_TELEMETRY, transmission: chosenTransmission, totalLaps: selectedLaps });
+      setTelemetry({
+        ...INITIAL_TELEMETRY,
+        transmission: chosenTransmission,
+        totalLaps: effectiveLaps,
+        totalRacers: effectiveRacers,
+        aliveRacers: effectiveRacers,
+        eliminatedCount: 0,
+        playerEliminated: false,
+        lastEliminated: null,
+        climateMode,
+      });
       setInRace(true);
       setRaceKey((k) => k + 1);
     },
-    [selectedLaps, steeringMode]
+    [selectedLaps, steeringMode, climateMode]
   );
 
   const handleRestartRace = useCallback(() => {
@@ -729,14 +783,27 @@ export default function App() {
       setActiveScreen('multiplayer');
       return;
     }
+    const effectiveLaps = selectedMode === 'last-man-standing' ? 14 : selectedLaps;
+    const effectiveRacers =
+      selectedMode === 'last-man-standing' ? 15 : selectedMode === 'time-trial' ? 1 : 6;
     setPaused(false);
     setShowRaceObjective(true);
     setSubmittedRank(null);
     setLastEarnedCoins(0);
     setIsNewBest(false);
-    setTelemetry({ ...INITIAL_TELEMETRY, transmission: transmissionMode, totalLaps: selectedLaps });
+    setTelemetry({
+      ...INITIAL_TELEMETRY,
+      transmission: transmissionMode,
+      totalLaps: effectiveLaps,
+      totalRacers: effectiveRacers,
+      aliveRacers: effectiveRacers,
+      eliminatedCount: 0,
+      playerEliminated: false,
+      lastEliminated: null,
+      climateMode,
+    });
     setRaceKey((k) => k + 1);
-  }, [selectedMode, room, transmissionMode, selectedLaps]);
+  }, [selectedMode, room, transmissionMode, selectedLaps, climateMode]);
 
   const handleNextLevel = useCallback(() => {
     if (selectedMode === 'multiplayer' && room) {
@@ -748,6 +815,9 @@ export default function App() {
     }
     const curIdx = TRACK_ORDER.indexOf(selectedTrack);
     const nextTrack = TRACK_ORDER[(curIdx + 1) % TRACK_ORDER.length];
+    const effectiveLaps = selectedMode === 'last-man-standing' ? 14 : selectedLaps;
+    const effectiveRacers =
+      selectedMode === 'last-man-standing' ? 15 : selectedMode === 'time-trial' ? 1 : 6;
     setSelectedTrack(nextTrack);
     setPaused(false);
     setShowRaceObjective(true);
@@ -755,9 +825,19 @@ export default function App() {
     setLastEarnedCoins(0);
     setIsNewBest(false);
     setShowPostRaceLeaderboard(false);
-    setTelemetry({ ...INITIAL_TELEMETRY, transmission: transmissionMode, totalLaps: selectedLaps });
+    setTelemetry({
+      ...INITIAL_TELEMETRY,
+      transmission: transmissionMode,
+      totalLaps: effectiveLaps,
+      totalRacers: effectiveRacers,
+      aliveRacers: effectiveRacers,
+      eliminatedCount: 0,
+      playerEliminated: false,
+      lastEliminated: null,
+      climateMode,
+    });
     setRaceKey((k) => k + 1);
-  }, [selectedMode, room, selectedTrack, transmissionMode, selectedLaps]);
+  }, [selectedMode, room, selectedTrack, transmissionMode, selectedLaps, climateMode]);
 
   const handleExitToMenu = useCallback(
     (destination: MenuScreen = 'intro') => {
@@ -1084,6 +1164,7 @@ export default function App() {
               selectedTrack={selectedTrack}
               selectedMode={selectedMode}
               timeOfDay={timeOfDay}
+              climateMode={climateMode}
               laps={selectedLaps}
               onSelectChassis={handleSelectChassis}
               onUnlockChassis={handleUnlockChassis}
@@ -1093,6 +1174,7 @@ export default function App() {
               }}
               onSelectMode={setSelectedMode}
               onSelectTimeOfDay={setTimeOfDay}
+              onSelectClimateMode={setClimateMode}
               onSelectLaps={setSelectedLaps}
               onBack={() => setActiveScreen('intro')}
               onOpenGarage={() => setActiveScreen('garage')}
@@ -1384,9 +1466,23 @@ export default function App() {
                       <span aria-hidden="true">·</span>
                       <span>{timeOfDay === 'morning' ? 'Morning' : timeOfDay === 'evening' ? 'Evening' : 'Night'}</span>
                       <span aria-hidden="true">·</span>
-                      <span>{CHASSIS_SPECS[vehicle.chassisId].name}</span>
+                      <span className="text-sky-300">
+                        {climateMode === 'dynamic'
+                          ? 'Dynamic Climate'
+                          : climateMode === 'rain'
+                          ? 'Rain'
+                          : climateMode === 'snow'
+                          ? 'Snow'
+                          : climateMode === 'mist'
+                          ? 'Mist'
+                          : 'Clear'}
+                      </span>
                       <span aria-hidden="true">·</span>
-                      <span>{selectedLaps} Laps</span>
+                      <span>
+                        {pendingRaceMode === 'last-man-standing'
+                          ? 'Last Man Standing (15 Cars · 14 Laps)'
+                          : `${selectedLaps} Laps`}
+                      </span>
                     </div>
                   </div>
                   <button
@@ -1433,30 +1529,36 @@ export default function App() {
                       ))}
                     </div>
 
-                    {/* Laps Dropdown Option */}
+                    {/* Laps Dropdown Option (Fixed 14-Lap Knockout for Last Man Standing) */}
                     <div className="flex items-center gap-1.5">
                       <label
                         htmlFor="prep-laps-select"
                         className="text-[10px] sm:text-xs font-display italic font-black text-[#FFD014] tracking-wider"
                       >
-                        LAPS:
+                        {pendingRaceMode === 'last-man-standing' ? 'FORMAT:' : 'LAPS:'}
                       </label>
-                      <div className="relative">
-                        <select
-                          id="prep-laps-select"
-                          aria-label="Select Race Laps"
-                          value={selectedLaps}
-                          onChange={(e) => setSelectedLaps(Number(e.target.value))}
-                          className="appearance-none h-8 pl-2.5 pr-7 rounded bg-[#14223A] border border-[#FFD014]/55 text-xs font-display italic font-black text-white focus:outline-none focus:border-[#FFD014] cursor-pointer"
-                        >
-                          {[1, 2, 3, 4, 5, 7, 10].map((n) => (
-                            <option key={n} value={n} className="bg-[#0B1424] text-white">
-                              {n} {n === 1 ? 'Lap' : 'Laps'}
-                            </option>
-                          ))}
-                        </select>
-                        <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#FFD014]" />
-                      </div>
+                      {pendingRaceMode === 'last-man-standing' ? (
+                        <div className="h-8 px-2.5 rounded bg-[#2A1016] border border-[#E5252B]/65 text-xs font-display italic font-black text-[#FFD014] flex items-center whitespace-nowrap">
+                          15 CARS · 14 LAPS
+                        </div>
+                      ) : (
+                        <div className="relative">
+                          <select
+                            id="prep-laps-select"
+                            aria-label="Select Race Laps"
+                            value={selectedLaps}
+                            onChange={(e) => setSelectedLaps(Number(e.target.value))}
+                            className="appearance-none h-8 pl-2.5 pr-7 rounded bg-[#14223A] border border-[#FFD014]/55 text-xs font-display italic font-black text-white focus:outline-none focus:border-[#FFD014] cursor-pointer"
+                          >
+                            {[1, 2, 3, 4, 5, 7, 10].map((n) => (
+                              <option key={n} value={n} className="bg-[#0B1424] text-white">
+                                {n} {n === 1 ? 'Lap' : 'Laps'}
+                              </option>
+                            ))}
+                          </select>
+                          <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#FFD014]" />
+                        </div>
+                      )}
                     </div>
                   </div>
                   {gyroNote && (
@@ -1558,6 +1660,7 @@ export default function App() {
             key={raceKey}
             trackId={activeTrackId}
             timeOfDay={timeOfDay}
+            climateMode={climateMode}
             mode={selectedMode}
             playerName={driverName}
             playerPlatform={platform}
@@ -1565,7 +1668,13 @@ export default function App() {
             playerId={playerId || 'local-player'}
             multiplayerPlayers={selectedMode === 'multiplayer' ? room?.players : undefined}
             fillWithAi={selectedMode === 'multiplayer' ? (room?.fillWithAi ?? true) : true}
-            lapsOverride={selectedMode === 'multiplayer' ? room?.laps : selectedLaps}
+            lapsOverride={
+              selectedMode === 'last-man-standing'
+                ? 14
+                : selectedMode === 'multiplayer'
+                ? room?.laps
+                : selectedLaps
+            }
             paused={paused || showRaceObjective}
             muted={muted}
             cameraMode={cameraMode}
@@ -1586,6 +1695,7 @@ export default function App() {
           <RaceHud
             trackId={activeTrackId}
             mode={selectedMode}
+            climateMode={climateMode}
             telemetry={telemetry}
             paused={paused}
             showObjective={showRaceObjective}
@@ -1603,6 +1713,7 @@ export default function App() {
             onCycleCamera={() =>
               setCameraMode((prev) => CAMERA_ORDER[(CAMERA_ORDER.indexOf(prev) + 1) % CAMERA_ORDER.length])
             }
+            onCycleClimate={handleCycleClimate}
             onToggleTransmission={() =>
               setTransmissionMode((prev) => (prev === 'auto' ? 'manual' : 'auto'))
             }

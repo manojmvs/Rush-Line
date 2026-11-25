@@ -12,11 +12,13 @@ import {
   type PhysicsCar,
 } from '../game/physics.ts';
 import { RacingAudioEngine } from '../game/audio.ts';
+import { createWeatherSystem } from '../game/weather.ts';
 import {
   DEFAULT_VEHICLE_CONFIG,
   TRACK_SPECS,
   type CameraMode,
   type ChassisId,
+  type ClimateMode,
   type GameMode,
   type MultiplayerPlayer,
   type PerformanceMode,
@@ -47,6 +49,7 @@ export interface TouchInputState {
 interface RaceCanvasProps {
   trackId: TrackId;
   timeOfDay: TimeOfDay;
+  climateMode?: ClimateMode;
   mode: GameMode;
   playerName: string;
   playerPlatform: PlatformType;
@@ -107,10 +110,19 @@ const AI_ROSTER: Array<{
   engineLevel: number;
 }> = [
   { name: 'K. Takahashi', chassisId: 'hyperion-proto', color: '#E2E8F0', accent: '#EF4444', skill: 1.03, engineLevel: 5 },
-  { name: 'L. Bellini', chassisId: 'stratos-gt3', color: '#2563EB', accent: '#F59E0B', skill: 0.99, engineLevel: 4 },
-  { name: 'M. Lindqvist', chassisId: 'veloce-v12', color: '#F59E0B', accent: '#0F172A', skill: 0.96, engineLevel: 4 },
-  { name: 'R. Alvarez', chassisId: 'vanguard-v8', color: '#15803D', accent: '#F8FAFC', skill: 0.93, engineLevel: 3 },
-  { name: 'S. Moreau', chassisId: 'drift-s15', color: '#0EA5E9', accent: '#F8FAFC', skill: 0.90, engineLevel: 3 },
+  { name: 'L. Bellini', chassisId: 'stratos-gt3', color: '#2563EB', accent: '#F59E0B', skill: 1.00, engineLevel: 4 },
+  { name: 'M. Lindqvist', chassisId: 'veloce-v12', color: '#F59E0B', accent: '#0F172A', skill: 0.98, engineLevel: 4 },
+  { name: 'R. Alvarez', chassisId: 'vanguard-v8', color: '#15803D', accent: '#F8FAFC', skill: 0.96, engineLevel: 4 },
+  { name: 'S. Moreau', chassisId: 'drift-s15', color: '#0EA5E9', accent: '#F8FAFC', skill: 0.94, engineLevel: 3 },
+  { name: 'A. Conti', chassisId: 'apex-gtr', color: '#EF4444', accent: '#FFFFFF', skill: 0.93, engineLevel: 4 },
+  { name: 'D. Novak', chassisId: 'stratos-gt3', color: '#7C3AED', accent: '#FDE047', skill: 0.92, engineLevel: 3 },
+  { name: 'H. Sato', chassisId: 'drift-s15', color: '#F97316', accent: '#0F172A', skill: 0.91, engineLevel: 3 },
+  { name: 'C. Vance', chassisId: 'vanguard-v8', color: '#14B8A6', accent: '#F8FAFC', skill: 0.90, engineLevel: 3 },
+  { name: 'E. Rossi', chassisId: 'veloce-v12', color: '#EC4899', accent: '#FFFFFF', skill: 0.89, engineLevel: 3 },
+  { name: 'N. Petrov', chassisId: 'hyperion-proto', color: '#84CC16', accent: '#0F172A', skill: 0.88, engineLevel: 3 },
+  { name: 'J. Morales', chassisId: 'apex-gtr', color: '#0284C7', accent: '#FACC15', skill: 0.87, engineLevel: 2 },
+  { name: 'T. Weber', chassisId: 'vanguard-v8', color: '#B91C1C', accent: '#E2E8F0', skill: 0.86, engineLevel: 2 },
+  { name: 'P. Laurent', chassisId: 'drift-s15', color: '#EAB308', accent: '#1E293B', skill: 0.85, engineLevel: 2 },
 ];
 
 // Reusable math helpers outside render loop (zero GC)
@@ -135,6 +147,7 @@ function detectSoftwareGl(): boolean {
 export function RaceCanvas({
   trackId,
   timeOfDay,
+  climateMode = 'dynamic',
   mode,
   playerName,
   playerPlatform,
@@ -183,6 +196,13 @@ export function RaceCanvas({
   const resumeLoopRef = useRef<(() => void) | null>(null);
   const performanceModeRef = useRef(performanceMode);
   const applyPerfRef = useRef<((mode: PerformanceMode) => void) | null>(null);
+  const climateModeRef = useRef<ClimateMode>(climateMode);
+  const applyClimateRef = useRef<((mode: ClimateMode) => void) | null>(null);
+
+  useEffect(() => {
+    climateModeRef.current = climateMode;
+    applyClimateRef.current?.(climateMode);
+  }, [climateMode]);
 
   useEffect(() => {
     audioRef.current?.setMuted(muted);
@@ -253,7 +273,9 @@ export function RaceCanvas({
       ? Math.min(renderer.capabilities.getMaxAnisotropy(), 4)
       : renderer.capabilities.getMaxAnisotropy();
     const builtTrack = buildTrackScene(trackId, timeOfDay, maxAniso, lowPower);
-    const totalLaps = lapsOverride ?? TRACK_SPECS[trackId].laps;
+    const isLastManStanding = mode === 'last-man-standing';
+    // Last Man Standing (15 cars): 14 laps so 1 car is eliminated every lap until 1 final survivor stands!
+    const totalLaps = isLastManStanding ? 14 : (lapsOverride ?? TRACK_SPECS[trackId].laps);
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(builtTrack.skyColor);
@@ -298,6 +320,29 @@ export function RaceCanvas({
       scene.add(headlightBeam);
     }
 
+    // Dynamic Climate System (Clear / Rain / Snow / Mist + Dynamic auto-cycling on ANY track!)
+    const weather = createWeatherSystem({
+      scene,
+      renderer,
+      sunLight: sun,
+      hemiLight: hemi,
+      roadMaterial: builtTrack.roadMaterial,
+      baseSkyColor: builtTrack.skyColor,
+      baseFogColor: builtTrack.fogColor,
+      baseFogDensity: builtTrack.fogDensity,
+      baseSunIntensity: builtTrack.sunIntensity,
+      baseHemiIntensity: builtTrack.hemiIntensity,
+      baseExposure: 1.1,
+      timeOfDay,
+      climateMode: climateModeRef.current,
+      lowPower,
+    });
+    applyClimateRef.current = (nextClimate: ClimateMode) => {
+      if (!disposed) {
+        weather.setClimateMode(nextClimate);
+      }
+    };
+
     const cameraFar = isEco ? 680 : lowPower ? 860 : 1450;
     const camera = new THREE.PerspectiveCamera(
       64,
@@ -306,24 +351,42 @@ export function RaceCanvas({
       cameraFar
     );
 
-    // Determine starting grid slot for local player
+    const carSpawnOpts = {
+      isGoKart: trackId === 'gokart-track',
+      getGroundY: builtTrack.getGroundY,
+    };
+
+    // Determine starting grid slot for local player (mid-pack P7 in 15-car Last Man Standing!)
     const remoteHumans = (multiplayerPlayers ?? []).filter((p) => p.id !== playerId);
     const localMpEntry = (multiplayerPlayers ?? []).find((p) => p.id === playerId);
-    const playerSlot = mode === 'multiplayer' && localMpEntry ? localMpEntry.gridSlot : 0;
+    const playerSlot =
+      mode === 'multiplayer' && localMpEntry
+        ? localMpEntry.gridSlot
+        : isLastManStanding
+        ? 6
+        : 0;
 
     const playerCar = createPhysicsCar(
       playerId || 'local-player',
       playerName,
       playerVehicle,
       builtTrack.samples,
-      playerSlot
+      playerSlot,
+      carSpawnOpts
     );
     const playerRig = buildVehicleMesh(playerVehicle, { lowPower });
     scene.add(playerRig.root);
 
     // Build remote multiplayer human peer rigs
     const peerCars: PeerCar[] = remoteHumans.map((mp) => {
-      const startCar = createPhysicsCar(mp.id, mp.name, mp.vehicle, builtTrack.samples, mp.gridSlot);
+      const startCar = createPhysicsCar(
+        mp.id,
+        mp.name,
+        mp.vehicle,
+        builtTrack.samples,
+        mp.gridSlot,
+        carSpawnOpts
+      );
       const rig = buildVehicleMesh(mp.vehicle, { lowPower });
       rig.root.position.set(startCar.x, startCar.y, startCar.z);
       rig.root.rotation.y = startCar.heading;
@@ -342,17 +405,20 @@ export function RaceCanvas({
       };
     });
 
-    // Build AI rivals for Quick Race or Multiplayer AI Grid Fill
+    // Build AI rivals: 14 rivals for 15-car Last Man Standing, 5 for Quick Race, or Multiplayer Grid Fill
     const aiRivals: AiRival[] = [];
     const wantAiCount =
       mode === 'time-trial'
         ? 0
+        : isLastManStanding
+        ? 14
         : mode === 'quick-race'
         ? 5
         : fillWithAi
         ? Math.max(0, 6 - (multiplayerPlayers?.length ?? 1))
         : 0;
 
+    const aiLowPower = lowPower || wantAiCount > 6;
     const usedSlots = new Set<number>([playerSlot, ...remoteHumans.map((p) => p.gridSlot)]);
     let nextSlot = 0;
     for (let i = 0; i < wantAiCount; i++) {
@@ -367,10 +433,17 @@ export function RaceCanvas({
         accentColor: template.accent,
         engineLevel: template.engineLevel,
       };
-      const aiCar = createPhysicsCar(`ai-${i}`, template.name, aiConfig, builtTrack.samples, nextSlot);
-      const aiRig = buildVehicleMesh(aiConfig, { lowPower });
+      const aiCar = createPhysicsCar(
+        `ai-${i}`,
+        template.name,
+        aiConfig,
+        builtTrack.samples,
+        nextSlot,
+        carSpawnOpts
+      );
+      const aiRig = buildVehicleMesh(aiConfig, { lowPower: aiLowPower });
       scene.add(aiRig.root);
-      const lanePattern = [-3.1, 3.1, -2.2, 2.2, -1.4];
+      const lanePattern = [-2.9, 2.9, -2.0, 2.0, -1.2, 1.2, -2.5, 2.5];
       aiRivals.push({
         car: aiCar,
         rig: aiRig,
@@ -585,10 +658,16 @@ export function RaceCanvas({
     const victoryCamCurr = new THREE.Vector3();
     const victoryLookCurr = new THREE.Vector3();
 
+    // Last Man Standing elimination tracker (eliminates last-place car at the end of every lap until 1 stands!)
+    let nextEliminationLap = 1;
+    const eliminatedMap = new Map<string, { rank: number; lap: number }>();
+    let playerEliminated = false;
+    let lastEliminated: RaceTelemetry['lastEliminated'] = null;
+
     const resetPlayerToTrack = () => {
       const s = builtTrack.samples[playerCar.sampleIndex];
       playerCar.x = s.pos.x;
-      playerCar.y = s.pos.y + 0.11;
+      playerCar.y = Math.max(s.pos.y + 0.128, builtTrack.getGroundY(s.pos.x, s.pos.z) + 0.06);
       playerCar.z = s.pos.z;
       playerCar.prevX = playerCar.x;
       playerCar.prevY = playerCar.y;
@@ -797,6 +876,7 @@ export function RaceCanvas({
     };
 
     const buildStandings = (): RaceTelemetry['standings'] => {
+      const pElim = eliminatedMap.get(playerCar.id);
       const list: RaceTelemetry['standings'] = [
         {
           id: playerCar.id,
@@ -812,10 +892,13 @@ export function RaceCanvas({
           topSpeedKmh: playerCar.topSpeedKmh,
           isPlayer: true,
           color: playerVehicle.primaryColor,
+          eliminated: Boolean(pElim),
+          eliminatedLap: pElim?.lap,
         },
       ];
 
       for (const ai of aiRivals) {
+        const aiElim = eliminatedMap.get(ai.car.id);
         list.push({
           id: ai.car.id,
           name: ai.car.name,
@@ -830,6 +913,8 @@ export function RaceCanvas({
           topSpeedKmh: ai.car.topSpeedKmh,
           isPlayer: false,
           color: ai.car.config.primaryColor,
+          eliminated: Boolean(aiElim),
+          eliminatedLap: aiElim?.lap,
         });
       }
 
@@ -853,6 +938,14 @@ export function RaceCanvas({
       }
 
       list.sort((a, b) => {
+        const aElim = Boolean(a.eliminated);
+        const bElim = Boolean(b.eliminated);
+        if (aElim !== bElim) return aElim ? 1 : -1;
+        if (aElim && bElim) {
+          const rankA = eliminatedMap.get(a.id)?.rank ?? 99;
+          const rankB = eliminatedMap.get(b.id)?.rank ?? 99;
+          return rankA - rankB;
+        }
         if (a.finished !== b.finished) return a.finished ? -1 : 1;
         if (a.finished && b.finished && a.finishTimeMs !== b.finishTimeMs) {
           return a.finishTimeMs - b.finishTimeMs;
@@ -1064,6 +1157,7 @@ export function RaceCanvas({
           const stepInput: CarInput =
             steps === 1 ? pInput : { ...pInput, shiftUp: false, shiftDown: false };
 
+          const weatherGripMult = weather.getGripMultiplier();
           const res = stepCarPhysics(
             playerCar,
             stepInput,
@@ -1081,7 +1175,9 @@ export function RaceCanvas({
             trackId,
             builtTrack.poleColliders,
             builtTrack.boxColliders,
-            builtTrack.breakables
+            builtTrack.breakables,
+            builtTrack.getGroundY,
+            weatherGripMult
           );
           if (res.barrierImpact > maxWallImpact) {
             maxWallImpact = res.barrierImpact;
@@ -1097,6 +1193,7 @@ export function RaceCanvas({
           }
 
           for (const ai of aiRivals) {
+            if (ai.car.eliminated) continue;
             let aiIn: CarInput;
             if (raceEnded) {
               aiIn = { throttle: 0, brake: 0.75, touchBrake: true, steer: 0, handbrake: Math.abs(ai.car.speed) < 4, nitro: false };
@@ -1146,12 +1243,14 @@ export function RaceCanvas({
               trackId,
               builtTrack.poleColliders,
               builtTrack.boxColliders,
-              builtTrack.breakables
+              builtTrack.breakables,
+              builtTrack.getGroundY,
+              weatherGripMult
             );
           }
 
           if (allowMovement && aiRivals.length > 0) {
-            const colRes = resolveCarCollisions(allPhysicsCars, playerCar.id);
+            const colRes = resolveCarCollisions(allPhysicsCars, playerCar.id, builtTrack.getGroundY);
             if (colRes.playerImpact > maxCarImpact) {
               maxCarImpact = colRes.playerImpact;
               carImpactX = colRes.impactX;
@@ -1160,38 +1259,114 @@ export function RaceCanvas({
             }
           }
 
-          // Podium finish & elimination rule:
-          // - If player crosses the finish line -> end race & lock standings!
-          // - If a rival finishes first while player is in 2nd or 3rd -> let player keep driving to reach the finish line!
-          // - If a rival has finished and player is in 4th or worse (> 3rd) -> immediately end race & show Lose screen!
+          // Mode-specific finish & elimination rules
           if (!raceEnded && allowMovement) {
-            const anyAiFinished = mode !== 'time-trial' && aiRivals.some((a) => a.car.finished);
-            let anyPeerFinished = false;
-            if (mode !== 'time-trial') {
-              for (const peer of peerCars) {
-                if (peerStatesRef.current.get(peer.player.id)?.finished) {
-                  anyPeerFinished = true;
-                  break;
-                }
-              }
-            }
-            if (anyAiFinished || anyPeerFinished) {
-              leaderFinished = true;
-            }
+            if (isLastManStanding) {
+              // LAST MAN STANDING (15 CARS): At the completion of each lap, the active car standing in last place
+              // is eliminated! Continues lap after lap until only 1 final car remains standing!
+              const activeCars = allPhysicsCars.filter((c) => !c.eliminated);
+              const aliveCount = activeCars.length;
 
-            if (playerCar.finished) {
-              raceEnded = true;
-              lockedFinishTimeMs = Math.round(raceElapsedMs);
-              lockedPlayerLap = playerCar.lap;
-              lockedStandings = buildStandings();
-            } else if (leaderFinished && mode !== 'time-trial') {
-              const liveStandings = buildStandings();
-              const playerPos = liveStandings.find((s) => s.isPlayer)?.position ?? 1;
-              if (playerPos > 3) {
+              if (aliveCount <= 1) {
+                playerCar.finished = true;
+                playerCar.finishTimeMs = Math.round(raceElapsedMs);
                 raceEnded = true;
                 lockedFinishTimeMs = Math.round(raceElapsedMs);
                 lockedPlayerLap = playerCar.lap;
-                lockedStandings = liveStandings;
+                lockedStandings = buildStandings();
+              } else {
+                let completedCount = 0;
+                let maxActiveLap = 1;
+                for (let k = 0; k < activeCars.length; k++) {
+                  const ac = activeCars[k];
+                  if (ac.lap > nextEliminationLap || ac.finished) completedCount++;
+                  if (ac.lap > maxActiveLap) maxActiveLap = ac.lap;
+                }
+
+                // Trigger elimination as soon as all cars except last place complete nextEliminationLap
+                // (or if leader laps ahead by 2 laps as deadlock safety)
+                if (completedCount >= aliveCount - 1 || maxActiveLap >= nextEliminationLap + 2) {
+                  let victim = activeCars[0];
+                  for (let k = 1; k < activeCars.length; k++) {
+                    if (activeCars[k].totalProgress < victim.totalProgress) {
+                      victim = activeCars[k];
+                    }
+                  }
+
+                  const elimRank = aliveCount;
+                  const elimLap = nextEliminationLap;
+                  victim.eliminated = true;
+                  eliminatedMap.set(victim.id, { rank: elimRank, lap: elimLap });
+                  nextEliminationLap++;
+
+                  lastEliminated = {
+                    name: victim.name,
+                    lap: elimLap,
+                    rank: elimRank,
+                    isPlayer: victim.id === playerCar.id,
+                    timestamp: Date.now(),
+                  };
+
+                  audio.playBeep(victim.id !== playerCar.id);
+                  spawnSmoke(victim.x, victim.y + 0.3, victim.z, 1.45);
+                  spawnSmoke(victim.x + 0.6, victim.y + 0.5, victim.z - 0.5, 1.25);
+
+                  if (victim.id === playerCar.id) {
+                    playerEliminated = true;
+                    raceEnded = true;
+                    lockedFinishTimeMs = Math.round(raceElapsedMs);
+                    lockedPlayerLap = playerCar.lap;
+                    lockedStandings = buildStandings();
+                  } else {
+                    const aiMatch = aiRivals.find((a) => a.car.id === victim.id);
+                    if (aiMatch) {
+                      aiMatch.rig.root.visible = false;
+                    }
+                    // If only 1 survivor (the player!) remains standing, crown Last Man Standing Winner immediately!
+                    if (aliveCount - 1 <= 1) {
+                      playerCar.finished = true;
+                      playerCar.finishTimeMs = Math.round(raceElapsedMs);
+                      raceEnded = true;
+                      lockedFinishTimeMs = Math.round(raceElapsedMs);
+                      lockedPlayerLap = playerCar.lap;
+                      lockedStandings = buildStandings();
+                    }
+                  }
+                }
+              }
+            } else {
+              // Standard podium finish & elimination rule:
+              // - If player crosses the finish line -> end race & lock standings!
+              // - If a rival finishes first while player is in 2nd or 3rd -> let player keep driving to reach the finish line!
+              // - If a rival has finished and player is in 4th or worse (> 3rd) -> immediately end race & show Lose screen!
+              const anyAiFinished = mode !== 'time-trial' && aiRivals.some((a) => a.car.finished);
+              let anyPeerFinished = false;
+              if (mode !== 'time-trial') {
+                for (const peer of peerCars) {
+                  if (peerStatesRef.current.get(peer.player.id)?.finished) {
+                    anyPeerFinished = true;
+                    break;
+                  }
+                }
+              }
+              if (anyAiFinished || anyPeerFinished) {
+                leaderFinished = true;
+              }
+
+              if (playerCar.finished) {
+                raceEnded = true;
+                lockedFinishTimeMs = Math.round(raceElapsedMs);
+                lockedPlayerLap = playerCar.lap;
+                lockedStandings = buildStandings();
+              } else if (leaderFinished && mode !== 'time-trial') {
+                const liveStandings = buildStandings();
+                const playerPos = liveStandings.find((s) => s.isPlayer)?.position ?? 1;
+                if (playerPos > 3) {
+                  raceEnded = true;
+                  lockedFinishTimeMs = Math.round(raceElapsedMs);
+                  lockedPlayerLap = playerCar.lap;
+                  lockedStandings = liveStandings;
+                }
               }
             }
           }
@@ -1287,6 +1462,10 @@ export function RaceCanvas({
 
         // Update AI 3D rigs with interpolation & expressive drift slip angle
         for (const ai of aiRivals) {
+          if (ai.car.eliminated) {
+            ai.rig.root.visible = false;
+            continue;
+          }
           const aiRenderH = lerpAngle(ai.car.prevHeading, ai.car.heading, alpha) + ai.car.driftAngle * 0.52;
           const aiVisualSteer = THREE.MathUtils.clamp(
             ai.car.steerAngle - ai.car.driftAngle * 0.48,
@@ -1379,7 +1558,7 @@ export function RaceCanvas({
         // Nearby AI rivals also kick up billowing drift smoke & leave tire skid marks around corners!
         if (!isEco) {
           for (const ai of aiRivals) {
-            if (ai.car.airborne || ai.car.driftIntensity <= 0.28 || Math.abs(ai.car.speed) < 11) continue;
+            if (ai.car.eliminated || ai.car.airborne || ai.car.driftIntensity <= 0.28 || Math.abs(ai.car.speed) < 11) continue;
             const dSq = (ai.car.x - playerCar.x) ** 2 + (ai.car.z - playerCar.z) ** 2;
             if (dSq > (lowPower ? 5600 : 10000)) continue;
             const aiVisH = ai.car.heading + ai.car.driftAngle * 0.5;
@@ -1511,7 +1690,10 @@ export function RaceCanvas({
           const heroLookZ = renderPz - cosH * 1.2 + rightZ * 2.25;
 
           victoryCamCurr.x = THREE.MathUtils.damp(victoryCamCurr.x, heroCamX, 3.4, dt);
-          victoryCamCurr.y = THREE.MathUtils.damp(victoryCamCurr.y, heroCamY, 3.4, dt);
+          victoryCamCurr.y = Math.max(
+            THREE.MathUtils.damp(victoryCamCurr.y, heroCamY, 3.4, dt),
+            builtTrack.getGroundY(victoryCamCurr.x, victoryCamCurr.z) + 0.8
+          );
           victoryCamCurr.z = THREE.MathUtils.damp(victoryCamCurr.z, heroCamZ, 3.4, dt);
 
           victoryLookCurr.x = THREE.MathUtils.damp(victoryLookCurr.x, heroLookX, 3.8, dt);
@@ -1545,10 +1727,13 @@ export function RaceCanvas({
             camDist = THREE.MathUtils.damp(camDist, targetDist, 5.5, dt);
             camHeight = THREE.MathUtils.damp(camHeight, targetHeight, 5.5, dt);
 
+            const desiredCamX = renderPx - sinCam * camDist + shakeX;
+            const desiredCamZ = renderPz - cosCam * camDist;
+            const minCamGroundY = builtTrack.getGroundY(desiredCamX, desiredCamZ) + 0.85;
             camera.position.set(
-              renderPx - sinCam * camDist + shakeX,
-              camY + camHeight + shakeY,
-              renderPz - cosCam * camDist
+              desiredCamX,
+              Math.max(camY + camHeight + shakeY, minCamGroundY),
+              desiredCamZ
             );
             _camLookTarget.set(
               renderPx + sinCam * 7.8,
@@ -1558,6 +1743,9 @@ export function RaceCanvas({
             camera.lookAt(_camLookTarget);
           }
         }
+
+        // Step Dynamic Climate System (Rain / Snow / Mist / Clear) centered cleanly around camera & player elevation
+        weather.update(dt, camera.position.x, renderPy, camera.position.z, allowMovement && !raceEnded);
 
         const targetFov = raceEnded
           ? 52
@@ -1614,22 +1802,35 @@ export function RaceCanvas({
           const standings = lockedStandings ?? buildStandings();
           const myStanding = standings.find((s) => s.isPlayer);
           const minimapCars = [
-            { id: playerCar.id, x: playerCar.x, z: playerCar.z, color: '#EF4444', isPlayer: true },
-            ...aiRivals.map((a) => ({
-              id: a.car.id,
-              x: a.car.x,
-              z: a.car.z,
-              color: '#94A3B8',
-              isPlayer: false,
-            })),
+            {
+              id: playerCar.id,
+              x: playerCar.x,
+              z: playerCar.z,
+              color: '#EF4444',
+              isPlayer: true,
+              eliminated: Boolean(playerCar.eliminated),
+            },
+            ...aiRivals
+              .filter((a) => !a.car.eliminated)
+              .map((a) => ({
+                id: a.car.id,
+                x: a.car.x,
+                z: a.car.z,
+                color: '#94A3B8',
+                isPlayer: false,
+                eliminated: false,
+              })),
             ...peerCars.map((p) => ({
               id: p.player.id,
               x: p.x,
               z: p.z,
               color: '#38BDF8',
               isPlayer: false,
+              eliminated: false,
             })),
           ];
+
+          const aliveRacers = standings.filter((s) => !s.eliminated).length;
 
           onTelemetryRef.current({
             speedKmh: Math.round(Math.abs(playerCar.speed) * 3.6),
@@ -1659,6 +1860,12 @@ export function RaceCanvas({
             countdown: countdownSec > 0 ? Math.ceil(countdownSec) : -1,
             finished: raceEnded,
             leaderFinished: leaderFinished && !raceEnded,
+            aliveRacers,
+            eliminatedCount: eliminatedMap.size,
+            playerEliminated,
+            lastEliminated,
+            activeWeather: weather.getActiveWeather(),
+            climateMode: weather.getClimateMode(),
             cameraMode: cameraModeRef.current,
             minimapCars,
             standings,
@@ -1754,6 +1961,7 @@ export function RaceCanvas({
       disposed = true;
       resumeLoopRef.current = null;
       applyPerfRef.current = null;
+      applyClimateRef.current = null;
       cancelAnimationFrame(frameId);
       clearTimeout(frameId);
       document.removeEventListener('visibilitychange', onVisibilityChange);
@@ -1763,6 +1971,7 @@ export function RaceCanvas({
       window.removeEventListener('resize', onResize);
       renderer.domElement.removeEventListener('webglcontextlost', onContextLost);
       audio.dispose();
+      weather.dispose();
       playerRig.dispose();
       aiRivals.forEach((a) => a.rig.dispose());
       peerCars.forEach((p) => p.rig.dispose());

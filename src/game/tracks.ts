@@ -190,7 +190,7 @@ export interface BreakablePart {
 
 export interface BreakableProp {
   id: number;
-  kind: 'pole' | 'bollard' | 'fence' | 'sign' | 'umbrella' | 'tree' | 'bench' | 'pot';
+  kind: 'pole' | 'bollard' | 'fence' | 'sign' | 'umbrella' | 'tree' | 'bench' | 'pot' | 'tyre';
   x: number;
   y: number;
   z: number;
@@ -211,6 +211,12 @@ export interface BreakableProp {
   spinAngle: number;
   spinVel: number;
   bounceCount: number;
+  // Optional metadata for reactive Go-Kart tyre-barrier stacks
+  sampleIdx?: number;
+  tier?: number;
+  side?: number;
+  baseGroundY?: number;
+  hitCooldown?: number;
 }
 
 export interface BuiltTrack {
@@ -239,6 +245,8 @@ export interface BuiltTrack {
   hemiIntensity: number;
   minimapPoints: Array<{ x: number; z: number }>;
   bounds: { minX: number; maxX: number; minZ: number; maxZ: number };
+  getGroundY: (x: number, z: number) => number;
+  roadMaterial: THREE.MeshStandardMaterial;
   dispose: () => void;
 }
 
@@ -322,7 +330,106 @@ export function knockBreakableProp(
 }
 
 /**
- * Steps active falling/tumbling poles & fences each frame and updates ONLY moved InstancedMesh entries.
+ * Triggers realistic rubber-barrier movement on Go-Kart tyre stacks near a car impact point.
+ * Light scrapes make stacks shift/wobble outward; medium-hard crashes pop upper tyres off
+ * the stack to bounce, roll, and scatter realistically while lower tyres recoil outward!
+ */
+export function impactNearbyTyres(
+  breakables: BreakableProp[],
+  sampleIdx: number,
+  sampleCount: number,
+  hitX: number,
+  hitZ: number,
+  carVx: number,
+  carVz: number,
+  outwardX: number,
+  outwardZ: number,
+  hitStrength: number
+): void {
+  if (breakables.length === 0) return;
+
+  const clampedStrength = THREE.MathUtils.clamp(hitStrength, 0.08, 1.0);
+  const impactRadius = 3.1 + clampedStrength * 2.5;
+  const impactRadiusSq = impactRadius * impactRadius;
+  const carSpeed = Math.hypot(carVx, carVz);
+  const carDirX = carSpeed > 0.8 ? carVx / carSpeed : outwardX;
+  const carDirZ = carSpeed > 0.8 ? carVz / carSpeed : outwardZ;
+  const halfSamples = sampleCount * 0.5;
+
+  for (let i = 0; i < breakables.length; i++) {
+    const p = breakables[i];
+    if (p.kind !== 'tyre') continue;
+    if ((p.hitCooldown ?? 0) > 0) continue;
+
+    // O(1) spline-window filter so we only inspect tyres right beside the collision
+    if (p.sampleIdx !== undefined) {
+      let idxDiff = Math.abs(p.sampleIdx - sampleIdx);
+      if (idxDiff > halfSamples) idxDiff = sampleCount - idxDiff;
+      if (idxDiff > 22) continue;
+    }
+
+    const dx = p.posX - hitX;
+    const dz = p.posZ - hitZ;
+    const distSq = dx * dx + dz * dz;
+    if (distSq > impactRadiusSq) continue;
+
+    const dist = Math.sqrt(distSq) || 0.01;
+    const prox = Math.pow(1 - dist / impactRadius, 1.2);
+    const localForce = clampedStrength * prox;
+    if (localForce < 0.035) continue;
+
+    const tier = p.tier ?? 0;
+    const radX = dx / dist;
+    const radZ = dz / dist;
+
+    // Blend outward barrier normal (52%), radial push away from car (28%), and glancing car momentum (20%)
+    let dirX = outwardX * 0.52 + radX * 0.28 + carDirX * 0.20;
+    let dirZ = outwardZ * 0.52 + radZ * 0.28 + carDirZ * 0.20;
+    const dLen = Math.hypot(dirX, dirZ) || 1;
+    dirX /= dLen;
+    dirZ /= dLen;
+
+    // Deterministic per-tyre slight scatter jitter so neighboring tyres separate naturally
+    const jitterHash = Math.sin(p.id * 19.37 + hitX * 0.7 + hitZ * 0.5) * 43758.5453;
+    const jitter = (jitterHash - Math.floor(jitterHash) - 0.5) * 0.34;
+    const cosJ = Math.cos(jitter);
+    const sinJ = Math.sin(jitter);
+    const pushX = dirX * cosJ - dirZ * sinJ;
+    const pushZ = dirX * sinJ + dirZ * cosJ;
+
+    p.knocked = true;
+    p.settled = false;
+    p.bounceCount = 0;
+    p.hitCooldown = 0.16;
+    p.fallDirX = pushX;
+    p.fallDirZ = pushZ;
+
+    // Tier-aware rubber impulse: upper tyres detach & fly/bounce easily; bottom tyres anchor & recoil outward
+    const tierBoost = tier === 0 ? 0.58 : tier === 1 ? 1.15 : 1.48;
+    const horizSpeed = (1.6 + localForce * 14.5 + Math.min(6.5, carSpeed * 0.14)) * tierBoost;
+
+    p.vx = p.vx * 0.35 + pushX * horizSpeed;
+    p.vz = p.vz * 0.35 + pushZ * horizSpeed;
+
+    if (tier >= 1) {
+      // Upper tyres hop off the stack and bounce rubberily on medium/hard impacts
+      const popUp = (0.9 + localForce * 6.8 + tier * 0.85) * (localForce > 0.18 ? 1.0 : 0.45);
+      p.vy = Math.max(p.vy, popUp);
+      p.tiltVel += (2.4 + localForce * 10.5) * (jitter >= 0 ? 1 : -1);
+      p.spinVel += (jitter >= 0 ? 1 : -1) * (1.8 + localForce * 6.5);
+    } else {
+      // Bottom tyres recoil outward and wobble; only hop & tumble on hard direct hits
+      const popUp = localForce > 0.36 ? (localForce - 0.28) * 5.2 : 0.25 + localForce * 1.4;
+      p.vy = Math.max(p.vy, popUp);
+      p.tiltVel += (1.1 + localForce * 4.8) * (jitter >= 0 ? 1 : -1);
+      p.spinVel += (jitter >= 0 ? 1 : -1) * (0.8 + localForce * 3.4);
+    }
+  }
+}
+
+/**
+ * Steps active falling/tumbling poles, fences & reactive Go-Kart tyres each frame,
+ * updating ONLY moved InstancedMesh entries with zero per-frame allocations.
  */
 export function stepBreakables(breakables: BreakableProp[], dt: number): void {
   if (breakables.length === 0) return;
@@ -333,7 +440,97 @@ export function stepBreakables(breakables: BreakableProp[], dt: number): void {
 
   for (let i = 0; i < breakables.length; i++) {
     const p = breakables[i];
+    if ((p.hitCooldown ?? 0) > 0) {
+      p.hitCooldown = Math.max(0, (p.hitCooldown ?? 0) - dt);
+    }
     if (!p.knocked || p.settled) continue;
+
+    // Dedicated realistic rubber-tyre physics for Go-Kart track tyre barriers!
+    if (p.kind === 'tyre') {
+      p.posX += p.vx * dt;
+      p.posZ += p.vz * dt;
+      p.vy -= GRAVITY * dt;
+      p.posY += p.vy * dt;
+
+      // Upper tyres stay supported by the stack below until displaced >0.44m off their stack center!
+      const horizDisp = Math.hypot(p.posX - p.x, p.posZ - p.z);
+      const tier = p.tier ?? 0;
+      const baseGround = p.baseGroundY ?? p.groundY;
+      const onStackSupport = tier > 0 && horizDisp < 0.44;
+      const effectiveGroundY = onStackSupport ? baseGround + tier * 0.415 : baseGround;
+
+      // Exact torus clearance height: 0.21m when flat on sidewall, 0.63m when rolling upright on tread!
+      const tyreSupportOffset = 0.21 + 0.42 * Math.abs(Math.sin(p.tiltAngle));
+      const restY = effectiveGroundY + tyreSupportOffset;
+
+      if (p.posY <= restY) {
+        p.posY = restY;
+        if (p.vy < -1.15 && p.bounceCount < 4) {
+          // Lively vulcanized-rubber bounce restitution!
+          p.vy = -p.vy * 0.52;
+          p.vx *= 0.76;
+          p.vz *= 0.76;
+          p.tiltVel *= 0.78;
+          p.spinVel *= 0.72;
+          p.bounceCount++;
+        } else {
+          p.vy = 0;
+          // Rolling tyres lose speed more gradually than flat-sliding tyres
+          const isRolling = Math.abs(Math.sin(p.tiltAngle)) > 0.65;
+          const drag = Math.exp((isRolling ? -2.2 : -4.2) * dt);
+          p.vx *= drag;
+          p.vz *= drag;
+          p.spinVel *= Math.exp(-3.8 * dt);
+        }
+      }
+
+      // Natural tyre wobble & flop-flat settling torque on ground contact
+      const onGround = p.posY <= restY + 0.035;
+      if (onGround) {
+        const nearestFlat = Math.round(p.tiltAngle / Math.PI) * Math.PI;
+        const flatError = nearestFlat - p.tiltAngle;
+        // Gravity gently pulls tilted tyres back onto their flat rubber sidewall with damped wobble
+        p.tiltVel += flatError * 14.5 * dt;
+        p.tiltVel *= Math.exp(-3.6 * dt);
+      } else {
+        p.tiltVel *= Math.exp(-0.75 * dt);
+      }
+      p.tiltAngle += p.tiltVel * dt;
+      p.spinAngle += p.spinVel * dt;
+
+      // Compose world transform around tyre center
+      _kbAxis.set(p.fallDirZ, 0, -p.fallDirX).normalize();
+      _kbQFall.setFromAxisAngle(_kbAxis, p.tiltAngle);
+      _kbQSpin.setFromAxisAngle(_kbUp, p.spinAngle);
+      _kbQTotal.copy(_kbQFall).multiply(_kbQSpin);
+      _kbPos.set(p.posX, p.posY, p.posZ);
+      _kbPivotMat.compose(_kbPos, _kbQTotal, _kbScale);
+
+      for (let j = 0; j < p.parts.length; j++) {
+        const part = p.parts[j];
+        _kbFinalMat.multiplyMatrices(_kbPivotMat, part.localMatrix);
+        part.mesh.setMatrixAt(part.instanceId, _kbFinalMat);
+        _dirtyBreakableMeshes.add(part.mesh);
+      }
+
+      const nearestFlat = Math.round(p.tiltAngle / Math.PI) * Math.PI;
+      if (
+        p.posY <= restY + 0.015 &&
+        Math.abs(p.vy) < 0.05 &&
+        Math.hypot(p.vx, p.vz) < 0.08 &&
+        Math.abs(p.tiltAngle - nearestFlat) < 0.025 &&
+        Math.abs(p.tiltVel) < 0.08 &&
+        Math.abs(p.spinVel) < 0.08
+      ) {
+        p.tiltAngle = nearestFlat;
+        p.tiltVel = 0;
+        p.vx = 0;
+        p.vz = 0;
+        p.vy = 0;
+        p.settled = true;
+      }
+      continue;
+    }
 
     // 1. Parabolic translational flight + road surface bounce & skid friction
     p.posX += p.vx * dt;
@@ -2139,14 +2336,59 @@ export function buildTrackScene(
   const groundGeo = new THREE.PlaneGeometry(1800, 1800, groundSegs, groundSegs);
   groundGeo.rotateX(-Math.PI / 2);
   const gPos = groundGeo.attributes.position;
+  const groundStride = groundSegs + 1;
+  const groundHeights = new Float32Array(gPos.count);
   for (let i = 0; i < gPos.count; i++) {
     const wx = gPos.getX(i) + centerX;
     const wz = gPos.getZ(i) + centerZ;
     const { y } = sampleTerrainHeight(wx, wz);
     gPos.setY(i, y);
+    groundHeights[i] = y;
   }
   gPos.needsUpdate = true;
   groundGeo.computeVertexNormals();
+
+  // Exact O(1) barycentric triangle height query matching Three.js PlaneGeometry triangles 100% identically!
+  // Eliminates any discrepancy between coarse terrain triangles and prop/car ground placement from any camera angle.
+  const sampleMeshGroundY = (wx: number, wz: number): number => {
+    if (isCity) return -0.02;
+    const gx = THREE.MathUtils.clamp(((wx - centerX + 900) / 1800) * groundSegs, 0, groundSegs - 0.0001);
+    const gz = THREE.MathUtils.clamp(((wz - centerZ + 900) / 1800) * groundSegs, 0, groundSegs - 0.0001);
+    const ix = Math.floor(gx);
+    const iz = Math.floor(gz);
+    const fx = gx - ix;
+    const fz = gz - iz;
+    const iA = iz * groundStride + ix;
+    const iB = (iz + 1) * groundStride + ix;
+    const iC = iB + 1;
+    const iD = iA + 1;
+    const yA = groundHeights[iA];
+    const yB = groundHeights[iB];
+    const yC = groundHeights[iC];
+    const yD = groundHeights[iD];
+    // PlaneGeometry splits each quad along diagonal (b -> d): tri1 = (a,b,d), tri2 = (b,c,d)
+    if (fx + fz <= 1) {
+      return yA + fx * (yD - yA) + fz * (yB - yA);
+    }
+    return yC + (1 - fx) * (yB - yC) + (1 - fz) * (yD - yC);
+  };
+
+  // Surface height helper for props near the road shoulder/embankment vs outer terrain
+  const sampleRoadsideGroundY = (wx: number, wz: number, roadY: number, absLat: number): number => {
+    if (isCity) return roadY + 0.22;
+    const meshY = sampleMeshGroundY(wx, wz);
+    const skirtEdge = barrierOffset + 0.72;
+    if (absLat <= skirtEdge) {
+      return Math.max(roadY - 0.02, meshY);
+    }
+    const embOuter = barrierOffset + 4.4;
+    if (absLat < embOuter) {
+      const t = (absLat - skirtEdge) / (embOuter - skirtEdge);
+      const embY = THREE.MathUtils.lerp(roadY - 0.02, meshY - 0.15, t);
+      return Math.max(embY, meshY);
+    }
+    return meshY;
+  };
 
   const groundMat = new THREE.MeshStandardMaterial({
     map: isCity ? undefined : groundTex,
@@ -2296,6 +2538,54 @@ export function buildTrackScene(
     skirt.receiveShadow = true;
     group.add(skirt);
     disposables.push(skirtGeo, skirtMat);
+
+    // Solid sloped earthen embankment sealing both outer edges of the road skirt firmly down into the terrain mesh
+    // so roads never appear as floating ribbons from low or side camera angles!
+    const buildEmbankmentSide = (side: -1 | 1): THREE.BufferGeometry => {
+      const innerLat = side * (barrierOffset + 0.72);
+      const outerLat = side * (barrierOffset + 4.4);
+      const n = samples.length;
+      const positions: number[] = [];
+      const uvs: number[] = [];
+      const indices: number[] = [];
+      for (let i = 0; i <= n; i++) {
+        const s = samples[i % n];
+        const ix = s.pos.x + s.right.x * innerLat;
+        const iz = s.pos.z + s.right.z * innerLat;
+        const ox = s.pos.x + s.right.x * outerLat;
+        const oz = s.pos.z + s.right.z * outerLat;
+        const iy = s.pos.y - 0.02;
+        const oy = sampleMeshGroundY(ox, oz) - 0.45;
+        const vCoord = (i / n) * length * 0.08;
+        if (side < 0) {
+          positions.push(ox, oy, oz, ix, iy, iz);
+        } else {
+          positions.push(ix, iy, iz, ox, oy, oz);
+        }
+        uvs.push(0, vCoord, 1, vCoord);
+      }
+      for (let i = 0; i < n; i++) {
+        const a = i * 2;
+        const b = a + 1;
+        const c = a + 2;
+        const d = a + 3;
+        indices.push(a, b, c, b, d, c);
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+      geo.setIndex(indices);
+      geo.computeVertexNormals();
+      return geo;
+    };
+    const leftEmbGeo = buildEmbankmentSide(-1);
+    const rightEmbGeo = buildEmbankmentSide(1);
+    const leftEmb = new THREE.Mesh(leftEmbGeo, skirtMat);
+    const rightEmb = new THREE.Mesh(rightEmbGeo, skirtMat);
+    leftEmb.receiveShadow = true;
+    rightEmb.receiveShadow = true;
+    group.add(leftEmb, rightEmb);
+    disposables.push(leftEmbGeo, rightEmbGeo);
   }
 
   // 3. Main drivable circuit surface (Variable-width street on City Track, sculpted jumps on Off-Road/Hill)
@@ -2557,11 +2847,11 @@ export function buildTrackScene(
       const taper = Math.sin(THREE.MathUtils.clamp(tNorm, 0.05, 0.95) * Math.PI);
       const w = Math.max(0.75, islandHalfWidth * 2 * (0.45 + 0.55 * Math.pow(taper, 0.5)));
 
-      const blkGeo = new THREE.BoxGeometry(w, 0.85, segLen + 0.35);
+      const blkGeo = new THREE.BoxGeometry(w, 1.2, segLen + 0.35);
       const blk = new THREE.Mesh(blkGeo, si <= startIdx + 5 ? hazardMat : islandTrimMat);
       blk.position.set(
         (s0.pos.x + s1.pos.x) * 0.5,
-        (s0.pos.y + s1.pos.y) * 0.5 + 0.48,
+        (s0.pos.y + s1.pos.y) * 0.5 + 0.33,
         (s0.pos.z + s1.pos.z) * 0.5
       );
       blk.rotation.set(-Math.atan2(dy, segLen), yaw, 0);
@@ -2875,9 +3165,9 @@ export function buildTrackScene(
   const colorTmp = new THREE.Color();
 
   if (isOffroad || isRiverside) {
-    // Stylized wooden post-and-rail fences curving smoothly along the dirt track edges (from reference image!)
-    const fencePostGeo = new THREE.BoxGeometry(0.24, 1.35, 0.24);
-    fencePostGeo.translate(0, 0.65, 0);
+    // Stylized wooden post-and-rail fences curving smoothly along the dirt track edges (deeply anchored posts!)
+    const fencePostGeo = new THREE.BoxGeometry(0.24, 2.05, 0.24);
+    fencePostGeo.translate(0, 0.35, 0);
     const fenceRailGeo = new THREE.BoxGeometry(0.12, 0.16, 1.0);
     const woodFenceMat = new THREE.MeshStandardMaterial({
       color: isNight ? 0x4b311d : 0x7c4b24,
@@ -3083,8 +3373,8 @@ export function buildTrackScene(
       metalness: 0.08,
       side: THREE.DoubleSide,
     });
-    const stakeGeo = new THREE.CylinderGeometry(0.055, 0.065, 1.02, 6);
-    stakeGeo.translate(0, 0.51, 0);
+    const stakeGeo = new THREE.CylinderGeometry(0.055, 0.065, 1.62, 6);
+    stakeGeo.translate(0, 0.22, 0);
     const stakeMat = new THREE.MeshStandardMaterial({
       color: 0x334155,
       roughness: 0.45,
@@ -3124,6 +3414,15 @@ export function buildTrackScene(
 
     const tireMatrices: THREE.Matrix4[] = [];
     const tireColors: THREE.Color[] = [];
+    const tireMeta: Array<{
+      x: number;
+      y: number;
+      z: number;
+      groundY: number;
+      sampleIdx: number;
+      tier: number;
+      side: number;
+    }> = [];
     const stakeMatrices: THREE.Matrix4[] = [];
 
     const colRed = new THREE.Color(isNight ? 0xb91c1c : 0xdc2626);
@@ -3168,6 +3467,8 @@ export function buildTrackScene(
           const bx = x0 + (x1 - x0) * frac;
           const by = y0 + (y1 - y0) * frac;
           const bz = z0 + (z1 - z0) * frac;
+          const absStackLat = Math.abs(lat0 + (lat1 - lat0) * frac);
+          const groundSupportY = sampleRoadsideGroundY(bx, bz, by, absStackLat);
 
           // Classic alternating karting blocks: 4 Red stacks, 4 White stacks, with dark rubber base/accent tires
           const blockIdx = Math.floor(stackCounter / 4);
@@ -3178,12 +3479,24 @@ export function buildTrackScene(
             const hash = Math.sin(stackCounter * 12.9898 + tier * 78.233 + side * 31.7) * 43758.5453;
             const jitter = (hash - Math.floor(hash) - 0.5) * 0.045;
             const rotY = (hash - Math.floor(hash)) * Math.PI * 2;
+            const tx = bx + jitter;
+            const ty = groundSupportY + 0.19 + tier * 0.415;
+            const tz = bz - jitter;
 
-            dummy.position.set(bx + jitter, by + 0.21 + tier * 0.415, bz - jitter);
+            dummy.position.set(tx, ty, tz);
             dummy.rotation.set(0, rotY, 0);
             dummy.scale.set(1.0, 1.0, 1.0);
             dummy.updateMatrix();
             tireMatrices.push(dummy.matrix.clone());
+            tireMeta.push({
+              x: tx,
+              y: ty,
+              z: tz,
+              groundY: groundSupportY,
+              sampleIdx: i,
+              tier,
+              side,
+            });
 
             // Alternate raw dark rubber tires on bottom tier of every other stack for authentic karting look
             if (isAccentBlackStack || (tier === 0 && stackCounter % 2 === 1)) {
@@ -3201,9 +3514,9 @@ export function buildTrackScene(
           if (stackCounter % 4 === 0) {
             const rx = s0.right.x * side;
             const rz = s0.right.z * side;
-            dummy.position.set(bx + rx * 0.62, by, bz + rz * 0.62);
+            dummy.position.set(bx + rx * 0.62, groundSupportY, bz + rz * 0.62);
             dummy.rotation.set(0, 0, 0);
-            dummy.scale.set(1, tiers === 3 ? 1.32 : 1.0, 1);
+            dummy.scale.set(1, tiers === 3 ? 1.25 : 1.0, 1);
             dummy.updateMatrix();
             stakeMatrices.push(dummy.matrix.clone());
           }
@@ -3220,11 +3533,22 @@ export function buildTrackScene(
       for (let i = 0; i < tireMatrices.length; i++) {
         tireInst.setMatrixAt(i, tireMatrices[i]);
         tireInst.setColorAt(i, tireColors[i]);
+        const tm = tireMeta[i];
+        const bId = registerBreakable('tyre', tm.x, tm.y, tm.z, tm.groundY, [
+          { mesh: tireInst, instanceId: i, worldMatrix: tireMatrices[i] },
+        ]);
+        const prop = breakables[bId];
+        prop.sampleIdx = tm.sampleIdx;
+        prop.tier = tm.tier;
+        prop.side = tm.side;
+        prop.baseGroundY = tm.groundY;
+        prop.hitCooldown = 0;
       }
       tireInst.instanceMatrix.needsUpdate = true;
       if (tireInst.instanceColor) tireInst.instanceColor.needsUpdate = true;
       tireInst.castShadow = !lowPower;
       tireInst.receiveShadow = true;
+      tireInst.frustumCulled = false;
       tireInst.computeBoundingSphere();
       group.add(tireInst);
     }
@@ -3258,8 +3582,8 @@ export function buildTrackScene(
     disposables.push(leftRailGeo, rightRailGeo, railMat);
 
     // Decorative wooden ranch fencing outside the perimeter on Racing/Hill meadow corners
-    const extPostGeo = new THREE.BoxGeometry(0.24, 1.3, 0.24);
-    extPostGeo.translate(0, 0.65, 0);
+    const extPostGeo = new THREE.BoxGeometry(0.24, 1.8, 0.24);
+    extPostGeo.translate(0, 0.42, 0);
     const extRailGeo = new THREE.BoxGeometry(0.11, 0.15, 1.0);
     const extWoodMat = new THREE.MeshStandardMaterial({
       color: isNight ? 0x4b311d : 0x7e4d26,
@@ -3289,8 +3613,8 @@ export function buildTrackScene(
       const pz = s.pos.z + s.right.z * lat;
       const nx = sNext.pos.x + sNext.right.x * lat;
       const nz = sNext.pos.z + sNext.right.z * lat;
-      const py = sampleTerrainHeight(px, pz).y;
-      const ny = sampleTerrainHeight(nx, nz).y;
+      const py = sampleRoadsideGroundY(px, pz, s.pos.y, lat);
+      const ny = sampleRoadsideGroundY(nx, nz, sNext.pos.y, lat);
       const dx = nx - px;
       const dy = ny - py;
       const dz = nz - pz;
@@ -3367,8 +3691,8 @@ export function buildTrackScene(
 
   // 6. Iconic Red-and-White Trackside Marker Bollards (non-city circuits — knock-downable!)
   if (!isCity) {
-    const bollardGeo = new THREE.CylinderGeometry(0.16, 0.18, 1.35, 8);
-    bollardGeo.translate(0, 0.67, 0);
+    const bollardGeo = new THREE.CylinderGeometry(0.16, 0.18, 1.65, 8);
+    bollardGeo.translate(0, 0.52, 0);
     const bollardMat = new THREE.MeshStandardMaterial({
       map: bollardTex,
       roughness: 0.42,
@@ -3388,13 +3712,14 @@ export function buildTrackScene(
         if (isOffroad && side === 1 && i % 66 < 46) continue;
         const bx = s.pos.x + s.right.x * side * bollardLat;
         const bz = s.pos.z + s.right.z * side * bollardLat;
-        const by = s.pos.y - 0.06;
+        const groundY = sampleRoadsideGroundY(bx, bz, s.pos.y, bollardLat);
+        const by = groundY - 0.02;
         dummy.position.set(bx, by, bz);
         dummy.rotation.set(0, Math.atan2(s.tangent.x, s.tangent.z), 0);
         dummy.scale.set(1, 1, 1);
         dummy.updateMatrix();
         bollardMatrices.push(dummy.matrix.clone());
-        bollardMeta.push({ x: bx, y: by, z: bz, groundY: s.pos.y + 0.08, sampleIdx: i });
+        bollardMeta.push({ x: bx, y: by, z: bz, groundY, sampleIdx: i });
       }
     }
     if (bollardMatrices.length > 0) {
@@ -3450,11 +3775,11 @@ export function buildTrackScene(
     polygonOffsetFactor: -2,
     polygonOffsetUnits: -2,
   });
-  for (let slot = 0; slot < 6; slot++) {
-    const backIdx = (samples.length - (4 + slot * 5)) % samples.length;
+  for (let slot = 0; slot < 15; slot++) {
+    const backIdx = (samples.length - (4 + slot * 3)) % samples.length;
     const gs = samples[backIdx];
     const laneSign = slot % 2 === 0 ? -1 : 1;
-    const lat = laneSign * (isGoKart ? 2.5 : 3.1);
+    const lat = laneSign * (isGoKart ? 2.4 : 2.9);
     const slotGroup = new THREE.Group();
     slotGroup.position.set(
       gs.pos.x + gs.right.x * lat,
@@ -3477,16 +3802,17 @@ export function buildTrackScene(
   gantryGroup.position.copy(startSample.pos);
   gantryGroup.rotation.y = startAngle;
 
-  const pillarGeo = new THREE.BoxGeometry(1.1, 8.6, 1.3);
+  // Deeply anchored gantry pillars extending 2.4m below track datum so they never float on sloped/embanked starts
+  const pillarGeo = new THREE.BoxGeometry(1.1, 11.0, 1.3);
   const gantryMetalMat = new THREE.MeshStandardMaterial({
     color: isOffroad ? 0x1e293b : 0x162235,
     roughness: 0.4,
     metalness: 0.55,
   });
   const leftPillar = new THREE.Mesh(pillarGeo, gantryMetalMat);
-  leftPillar.position.set(-(halfRoad + 2.4), 4.3, 0);
+  leftPillar.position.set(-(halfRoad + 2.4), 3.1, 0);
   const rightPillar = new THREE.Mesh(pillarGeo, gantryMetalMat);
-  rightPillar.position.set(halfRoad + 2.4, 4.3, 0);
+  rightPillar.position.set(halfRoad + 2.4, 3.1, 0);
   for (const side of [-1, 1]) {
     poleColliders.push({
       x: startSample.pos.x + startSample.right.x * side * (halfRoad + 2.4),
@@ -3543,7 +3869,9 @@ export function buildTrackScene(
 
   // 8. Start-Straight Grandstands / Pit Canopies (for Racing, Stadium & Go-Kart; open alpine for Off-Road; city blocks for City!)
   if (!isOffroad && !isCity && !isStadium) {
-    const standGeo = new THREE.BoxGeometry(isGoKart ? 5.5 : 8, isGoKart ? 4.2 : 6.5, isGoKart ? 26 : 42);
+    const standBaseH = isGoKart ? 4.2 : 6.5;
+    const standPlinthDepth = 4.0;
+    const standGeo = new THREE.BoxGeometry(isGoKart ? 5.5 : 8, standBaseH + standPlinthDepth, isGoKart ? 26 : 42);
     const standRoofGeo = new THREE.BoxGeometry(isGoKart ? 6.8 : 9.5, 0.45, isGoKart ? 28 : 44);
     const standMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.75, metalness: 0.2 });
     const roofMat = new THREE.MeshStandardMaterial({
@@ -3555,14 +3883,16 @@ export function buildTrackScene(
     for (const side of [-1, 1]) {
       const stand = new THREE.Group();
       const base = new THREE.Mesh(standGeo, standMat);
-      base.position.y = isGoKart ? 2.1 : 3.25;
+      // Extends 4.0m below datum into terrain so grandstands never hover on hillsides from any camera angle
+      base.position.y = (standBaseH - standPlinthDepth) * 0.5;
       base.castShadow = !lowPower;
       const roof = new THREE.Mesh(standRoofGeo, roofMat);
       roof.position.y = isGoKart ? 4.8 : 7.4;
       stand.add(base, roof);
       const gx = startSample.pos.x + startSample.right.x * side * (barrierOffset + (isGoKart ? 7.5 : 10));
       const gz = startSample.pos.z - (isGoKart ? 14 : 22);
-      stand.position.set(gx, startSample.pos.y, gz);
+      const standY = Math.min(startSample.pos.y, sampleMeshGroundY(gx, gz) + 0.15);
+      stand.position.set(gx, standY, gz);
       group.add(stand);
       boxColliders.push({
         x: gx,
@@ -3604,8 +3934,8 @@ export function buildTrackScene(
   if (isNight || isGoKart || isCity || isStadium) {
     const postGeo = isCity
       ? new THREE.CylinderGeometry(0.11, 0.24, 6.8, 8)
-      : new THREE.CylinderGeometry(0.13, 0.19, 8.6, 6);
-    postGeo.translate(0, isCity ? 3.4 : 4.3, 0);
+      : new THREE.CylinderGeometry(0.13, 0.19, 9.8, 6);
+    postGeo.translate(0, isCity ? 3.4 : 3.7, 0);
     const postMat = new THREE.MeshStandardMaterial({
       color: isCity ? 0x1a1e22 : 0x475569,
       roughness: isCity ? 0.38 : 0.45,
@@ -3731,7 +4061,10 @@ export function buildTrackScene(
     });
     const pondCircleGeo = new THREE.CircleGeometry(1, 14);
     pondCircleGeo.rotateX(-Math.PI / 2);
-    disposables.push(pondWaterMat, pondBankMat, pondCircleGeo);
+    // Solid earthen pebble basin rim extending downward 2.6m so pond shorelines sit embedded on sloped terrain!
+    const pondBasinGeo = new THREE.CylinderGeometry(1.0, 1.24, 2.6, 14);
+    pondBasinGeo.translate(0, -1.3, 0);
+    disposables.push(pondWaterMat, pondBankMat, pondCircleGeo, pondBasinGeo);
 
     for (const si of candidatePondIndices) {
       const s = samples[si % samples.length];
@@ -3744,23 +4077,22 @@ export function buildTrackScene(
 
       const py =
         Math.max(
-          s.pos.y - 0.08,
-          sampleTerrainHeight(px, pz).y,
-          sampleTerrainHeight(px + rx * 0.7, pz).y,
-          sampleTerrainHeight(px - rx * 0.7, pz).y,
-          sampleTerrainHeight(px, pz + rz * 0.7).y,
-          sampleTerrainHeight(px, pz - rz * 0.7).y
-        ) + 0.28;
+          sampleMeshGroundY(px, pz),
+          sampleMeshGroundY(px + rx * 0.7, pz),
+          sampleMeshGroundY(px - rx * 0.7, pz),
+          sampleMeshGroundY(px, pz + rz * 0.7),
+          sampleMeshGroundY(px, pz - rz * 0.7)
+        ) + 0.12;
       const yaw = Math.atan2(s.tangent.x, s.tangent.z);
 
-      const bankMesh = new THREE.Mesh(pondCircleGeo, pondBankMat);
+      const bankMesh = new THREE.Mesh(pondBasinGeo, pondBankMat);
       bankMesh.position.set(px, py - 0.04, pz);
       bankMesh.rotation.y = yaw;
       bankMesh.scale.set(rx + 2.4, 1, rz + 2.6);
       group.add(bankMesh);
 
       const waterMesh = new THREE.Mesh(pondCircleGeo, pondWaterMat);
-      waterMesh.position.set(px, py + 0.06, pz);
+      waterMesh.position.set(px, py + 0.04, pz);
       waterMesh.rotation.y = yaw;
       waterMesh.scale.set(rx, 1, rz);
       group.add(waterMesh);
@@ -3778,9 +4110,9 @@ export function buildTrackScene(
     return false;
   };
 
-  // B. 4-Part Layered Stylized Low-Poly Pine Trees (flared bark trunk + 3 vibrant stacked green cone tiers!)
-  const trunkGeo = new THREE.CylinderGeometry(0.4, 0.72, 4.4, 7);
-  trunkGeo.translate(0, 2.2, 0);
+  // B. 4-Part Layered Stylized Low-Poly Pine Trees (flared bark trunk with deep root base + 3 stacked green cone tiers!)
+  const trunkGeo = new THREE.CylinderGeometry(0.4, 0.78, 5.2, 7);
+  trunkGeo.translate(0, 1.8, 0);
   const trunkMat = new THREE.MeshStandardMaterial({
     color: isNight ? 0x452814 : 0x8e4e24,
     roughness: 0.92,
@@ -4185,12 +4517,20 @@ export function buildTrackScene(
     // - Terracotta Olive & Mediterranean Cypress Planter Pots
     // - Outdoor Trattoria Cafe Umbrellas on Wide Piazzas
     // =========================================================================
-    const vespaBodyGeo = new THREE.BoxGeometry(0.56, 0.58, 1.52);
-    vespaBodyGeo.translate(0, 0.52, 0);
+    const vespaBodyGeo = new THREE.BoxGeometry(0.56, 0.56, 1.52);
+    vespaBodyGeo.translate(0, 0.44, 0);
     const vespaShieldGeo = new THREE.BoxGeometry(0.58, 0.62, 0.22);
-    vespaShieldGeo.translate(0, 0.72, 0.56);
+    vespaShieldGeo.translate(0, 0.66, 0.56);
     const vespaSeatGeo = new THREE.BoxGeometry(0.46, 0.15, 0.76);
-    vespaSeatGeo.translate(0, 0.86, -0.18);
+    vespaSeatGeo.translate(0, 0.79, -0.18);
+    // Front & rear rubber scooter wheels resting flush at y = 0 on the sidewalk!
+    const vespaWheelGeo = new THREE.CylinderGeometry(0.22, 0.22, 0.16, 10);
+    vespaWheelGeo.rotateZ(Math.PI / 2);
+    const vespaFrontWheelGeo = vespaWheelGeo.clone();
+    vespaFrontWheelGeo.translate(0, 0.22, 0.52);
+    const vespaRearWheelGeo = vespaWheelGeo.clone();
+    vespaRearWheelGeo.translate(0, 0.22, -0.52);
+    const vespaWheelMat = new THREE.MeshStandardMaterial({ color: 0x1a1d24, roughness: 0.88 });
     const vespaMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.35, metalness: 0.22 });
     const leatherSeatMat = new THREE.MeshStandardMaterial({ color: 0x5c341d, roughness: 0.78 });
 
@@ -4208,7 +4548,7 @@ export function buildTrackScene(
       pushBox(
         vespaItems,
         vx,
-        0.22,
+        0.21,
         vz,
         yaw,
         1,
@@ -4230,7 +4570,10 @@ export function buildTrackScene(
       addInstBatch(vespaBodyGeo, vespaMat, vespaItems, true);
       addInstBatch(vespaShieldGeo, vespaMat, vespaItems, true);
       addInstBatch(vespaSeatGeo, leatherSeatMat, vespaItems, false);
+      addInstBatch(vespaFrontWheelGeo, vespaWheelMat, vespaItems, false);
+      addInstBatch(vespaRearWheelGeo, vespaWheelMat, vespaItems, false);
     }
+    disposables.push(vespaWheelGeo, vespaFrontWheelGeo, vespaRearWheelGeo, vespaWheelMat);
 
     // Terracotta Planter Pots with Slender Mediterranean Cypress / Olive Trees along the piazza sidewalks (movable!)
     const potGeo = new THREE.CylinderGeometry(0.42, 0.30, 0.65, 8);
@@ -4556,9 +4899,10 @@ export function buildTrackScene(
 
     const stageLength = 21.5;
 
-    // 1. Trackside concrete front parapet wall & vivid red/gold stadium fascia (local -X faces the track!)
-    const frontWallGeo = new THREE.BoxGeometry(1.1, 2.0, stageLength);
-    frontWallGeo.translate(-6.4, 1.0, 0);
+    // 1. Trackside concrete front parapet wall & vivid red/gold stadium fascia (deeply skirted 1.6m below datum!)
+    const stageSkirt = 1.6;
+    const frontWallGeo = new THREE.BoxGeometry(1.1, 2.0 + stageSkirt, stageLength);
+    frontWallGeo.translate(-6.4, (2.0 - stageSkirt) * 0.5, 0);
     const frontWallMat = new THREE.MeshStandardMaterial({
       color: 0xe2e8f0,
       roughness: 0.65,
@@ -4582,8 +4926,8 @@ export function buildTrackScene(
       { x: 6.4, h: 8.7, d: 3.0 },
     ];
     const tierGeos = tierSpecs.map((ts) => {
-      const g = new THREE.BoxGeometry(ts.d, ts.h, stageLength);
-      g.translate(ts.x, ts.h * 0.5, 0);
+      const g = new THREE.BoxGeometry(ts.d, ts.h + stageSkirt, stageLength);
+      g.translate(ts.x, (ts.h - stageSkirt) * 0.5, 0);
       return g;
     });
     const tierMat = new THREE.MeshStandardMaterial({
@@ -4593,8 +4937,8 @@ export function buildTrackScene(
     });
 
     // 3. Rear concourse enclosure wall, structural steel canopy pillars & cantilevered architectural roof!
-    const backWallGeo = new THREE.BoxGeometry(1.0, 12.6, stageLength);
-    backWallGeo.translate(8.1, 6.3, 0);
+    const backWallGeo = new THREE.BoxGeometry(1.0, 12.6 + stageSkirt, stageLength);
+    backWallGeo.translate(8.1, (12.6 - stageSkirt) * 0.5, 0);
     const backWallMat = new THREE.MeshStandardMaterial({
       color: 0x334155,
       roughness: 0.62,
@@ -4616,7 +4960,7 @@ export function buildTrackScene(
       emissiveIntensity: isNight ? 2.1 : 0.75,
       roughness: 0.2,
     });
-    const stPillarGeo = new THREE.BoxGeometry(0.75, 12.6, 0.75);
+    const stPillarGeo = new THREE.BoxGeometry(0.75, 12.6 + stageSkirt, 0.75);
     const stPillarMat = new THREE.MeshStandardMaterial({
       color: 0x1e293b,
       roughness: 0.45,
@@ -4809,8 +5153,8 @@ export function buildTrackScene(
     const jumboFrameGeo = new THREE.BoxGeometry(1.1, 8.4, 16.4);
     const jumboScreenGeo = new THREE.PlaneGeometry(15.2, 7.2);
     jumboScreenGeo.rotateY(Math.PI / 2); // faces +X; we flip inward toward track
-    const jumboPylonGeo = new THREE.CylinderGeometry(0.4, 0.55, 19.5, 8);
-    jumboPylonGeo.translate(0, 9.75, 0);
+    const jumboPylonGeo = new THREE.CylinderGeometry(0.4, 0.55, 22.0, 8);
+    jumboPylonGeo.translate(0, 8.5, 0);
     const jumboScreenMat = new THREE.MeshStandardMaterial({
       map: jumbotronTex,
       emissiveMap: jumbotronTex,
@@ -4828,7 +5172,7 @@ export function buildTrackScene(
       const jz = s.pos.z - s.right.z * dist;
 
       const jGroup = new THREE.Group();
-      jGroup.position.set(jx, s.pos.y, jz);
+      jGroup.position.set(jx, Math.min(s.pos.y, sampleMeshGroundY(jx, jz) + 0.2), jz);
       jGroup.rotation.y = yaw;
 
       const leftPylon = new THREE.Mesh(jumboPylonGeo, stPillarMat);
@@ -4847,8 +5191,8 @@ export function buildTrackScene(
     }
 
     // 6. Eight Giant Stadium Corner Floodlight Towers rising above the arena bowl
-    const mastGeo = new THREE.CylinderGeometry(0.45, 0.85, 32, 8);
-    mastGeo.translate(0, 16, 0);
+    const mastGeo = new THREE.CylinderGeometry(0.45, 0.85, 34, 8);
+    mastGeo.translate(0, 15, 0);
     const headGeo = new THREE.BoxGeometry(7.2, 3.0, 1.2);
     headGeo.translate(0, 32.4, 0);
     const headMat = new THREE.MeshStandardMaterial({
@@ -4864,7 +5208,7 @@ export function buildTrackScene(
       const ang = (k / towerCount) * Math.PI * 2;
       const tx = centerX + Math.cos(ang) * 172;
       const tz = centerZ + Math.sin(ang) * 192;
-      dummy.position.set(tx, -0.2, tz);
+      dummy.position.set(tx, sampleMeshGroundY(tx, tz) - 0.35, tz);
       dummy.rotation.set(0, Math.atan2(centerX - tx, centerZ - tz), 0);
       dummy.scale.set(1, 1, 1);
       dummy.updateMatrix();
@@ -4929,11 +5273,11 @@ export function buildTrackScene(
     if (isRiverside && side === 1 && dist < barrierOffset + 52) continue;
     if (isInsidePond(x, z)) continue;
 
-    const { y: gy } = sampleTerrainHeight(x, z);
+    const gy = sampleMeshGroundY(x, z);
     const s = 0.78 + rand() * 0.62;
     const sy = s * (0.88 + rand() * 0.36);
 
-    dummy.position.set(x, gy - 0.15, z);
+    dummy.position.set(x, gy - 0.12, z);
     dummy.rotation.set((rand() - 0.5) * 0.04, rand() * Math.PI * 2, (rand() - 0.5) * 0.04);
     dummy.scale.set(s, sy, s);
     dummy.updateMatrix();
@@ -4946,7 +5290,7 @@ export function buildTrackScene(
 
     // Every pine tree within drivable side-road range is now a movable knock-downable object!
     if (dist < barrierOffset + 42) {
-      const breakableId = registerBreakable('tree', x, gy - 0.15, z, gy + 0.08, [
+      const breakableId = registerBreakable('tree', x, gy - 0.12, z, gy + 0.08, [
         { mesh: trunkInst, instanceId: tCount, worldMatrix: treeWorldMat },
         { mesh: tier1Inst, instanceId: tCount, worldMatrix: treeWorldMat },
         { mesh: tier2Inst, instanceId: tCount, worldMatrix: treeWorldMat },
@@ -5010,14 +5354,15 @@ export function buildTrackScene(
   let rCount = 0;
   let bCount = 0;
 
-  const addBushCluster = (cx: number, cy: number, cz: number, count: number) => {
+  const addBushCluster = (cx: number, _cy: number, cz: number, count: number, overrideY?: number) => {
     for (let k = 0; k < count && bCount < maxBushes; k++) {
       const ang = rand() * Math.PI * 2;
       const rad = 0.6 + rand() * 1.4;
       const bx = cx + Math.cos(ang) * rad;
       const bz = cz + Math.sin(ang) * rad;
       const s = 0.65 + rand() * 0.75;
-      dummy.position.set(bx, cy - 0.1, bz);
+      const by = overrideY !== undefined ? overrideY : sampleMeshGroundY(bx, bz);
+      dummy.position.set(bx, by - 0.14 * s, bz);
       dummy.rotation.set(0, rand() * Math.PI * 2, 0);
       dummy.scale.set(s * 1.15, s * 0.75, s);
       dummy.updateMatrix();
@@ -5038,7 +5383,8 @@ export function buildTrackScene(
       const sx = 0.9 + rand() * 1.3;
       const sy = 0.6 + rand() * 0.85;
       const sz = 0.9 + rand() * 1.3;
-      dummy.position.set(bx, p.y - 0.18, bz);
+      const bankY = Math.min(p.y, sampleMeshGroundY(bx, bz) + 0.12);
+      dummy.position.set(bx, bankY - 0.28 * sy, bz);
       dummy.rotation.set(rand() * 0.25, rand() * Math.PI * 2, rand() * 0.25);
       dummy.scale.set(sx, sy, sz);
       dummy.updateMatrix();
@@ -5046,7 +5392,7 @@ export function buildTrackScene(
       colorTmp.setHSL(0.6, 0.05, (isNight ? 0.28 : 0.56) + rand() * 0.14);
       rockInst.setColorAt(rCount, colorTmp);
       rCount++;
-      addBushCluster(bx, p.y, bz, 2);
+      addBushCluster(bx, bankY, bz, 2, bankY);
     }
   }
 
@@ -5061,12 +5407,12 @@ export function buildTrackScene(
     if (!isClearOfTrack(x, z, barrierOffset + 3.2)) continue;
     if (isInsidePond(x, z)) continue;
 
-    const { y: gy } = sampleTerrainHeight(x, z);
+    const gy = sampleMeshGroundY(x, z);
     const isNearRoad = dist < barrierOffset + 14;
     const sx = isNearRoad ? 0.9 + rand() * 1.4 : 1.4 + rand() * 3.0;
     const sy = isNearRoad ? 0.65 + rand() * 1.05 : 1.0 + rand() * 2.6;
     const sz = isNearRoad ? 0.9 + rand() * 1.4 : 1.4 + rand() * 3.0;
-    dummy.position.set(x, gy - 0.2, z);
+    dummy.position.set(x, gy - 0.32 * sy, z);
     dummy.rotation.set(rand() * 0.25, rand() * Math.PI * 2, rand() * 0.25);
     dummy.scale.set(sx, sy, sz);
     dummy.updateMatrix();
@@ -5098,7 +5444,7 @@ export function buildTrackScene(
     const z = sample.pos.z + sample.right.z * side * dist;
     if (!isClearOfTrack(x, z, barrierOffset + 2.1)) continue;
     if (isInsidePond(x, z)) continue;
-    const { y: gy } = sampleTerrainHeight(x, z);
+    const gy = sampleMeshGroundY(x, z);
     addBushCluster(x, gy, z, 1);
   }
 
@@ -5116,7 +5462,7 @@ export function buildTrackScene(
   group.add(rockInst, bushInst);
   disposables.push(rockGeo, rockMat, bushGeo, bushMat);
 
-  // E. Fallen Timber Logs with Tan Cut Ends (directly from left meadow of the reference image!)
+  // E. Fallen Timber Logs with Tan Cut Ends (aligned seamlessly to terrain slope so neither end ever hovers!)
   const logBarkGeo = new THREE.CylinderGeometry(0.42, 0.48, 3.6, 8);
   logBarkGeo.rotateZ(Math.PI / 2);
   logBarkGeo.translate(0, 0.42, 0);
@@ -5148,11 +5494,18 @@ export function buildTrackScene(
     const z = sample.pos.z + sample.right.z * side * dist;
     if (!isClearOfTrack(x, z, barrierOffset + 4.5)) continue;
     if (isInsidePond(x, z)) continue;
-    const { y: gy } = sampleTerrainHeight(x, z);
     const s = 0.8 + rand() * 0.55;
     const logYaw = rand() * Math.PI * 2;
-    dummy.position.set(x, gy - 0.08, z);
-    dummy.rotation.set(0, logYaw, 0);
+    const cosY = Math.cos(logYaw);
+    const sinY = Math.sin(logYaw);
+    const halfLen = 1.65 * s;
+    const yC = sampleMeshGroundY(x, z);
+    const yL = sampleMeshGroundY(x - cosY * halfLen, z + sinY * halfLen);
+    const yR = sampleMeshGroundY(x + cosY * halfLen, z - sinY * halfLen);
+    const baseY = Math.min(yC, (yL + yR) * 0.5) - 0.14 * s;
+    const slopeRoll = Math.atan2(yR - yL, halfLen * 2);
+    dummy.position.set(x, baseY, z);
+    dummy.rotation.set(0, logYaw, THREE.MathUtils.clamp(slopeRoll, -0.35, 0.35), 'YXZ');
     dummy.scale.set(s, s, s);
     dummy.updateMatrix();
     logBarkInst.setMatrixAt(lCount, dummy.matrix);
@@ -5162,8 +5515,8 @@ export function buildTrackScene(
       z,
       halfW: 1.85 * s,
       halfD: 0.48 * s,
-      cosYaw: Math.cos(logYaw),
-      sinYaw: Math.sin(logYaw),
+      cosYaw: cosY,
+      sinYaw: sinY,
       sampleIdx,
     });
     lCount++;
@@ -5271,7 +5624,8 @@ export function buildTrackScene(
   // 12. High-Visibility Motorsport Corner Diversion Chevron Boards (<<< / >>>) & Overhead Drift Zone Arches
   const chevLeftTex = createCornerChevronTexture(maxAniso, -1);
   const chevRightTex = createCornerChevronTexture(maxAniso, 1);
-  const chevPostGeo = new THREE.BoxGeometry(0.18, 2.3, 0.18);
+  // Deeply anchored post extending 1.6m below track datum so chevrons never float above embankments
+  const chevPostGeo = new THREE.BoxGeometry(0.18, 3.9, 0.18);
   const chevBoardGeo = new THREE.BoxGeometry(3.2, 1.55, 0.22);
   const chevPostMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.45, metalness: 0.65 });
   const chevLeftMat = new THREE.MeshStandardMaterial({
@@ -5312,8 +5666,10 @@ export function buildTrackScene(
     // crossY > 0 means track curves left -> outside wall is on the RIGHT (+1) and arrows point LEFT (-1)
     const turnDir: -1 | 1 = crossY > 0 ? -1 : 1;
     const outsideSide = -turnDir;
-    const px = s.pos.x + s.right.x * outsideSide * (barrierOffset + 0.95);
-    const pz = s.pos.z + s.right.z * outsideSide * (barrierOffset + 0.95);
+    const chevLat = barrierOffset + 0.95;
+    const px = s.pos.x + s.right.x * outsideSide * chevLat;
+    const pz = s.pos.z + s.right.z * outsideSide * chevLat;
+    const chevBaseY = sampleRoadsideGroundY(px, pz, s.pos.y, chevLat);
     // Angle the chevron board slightly inward toward oncoming drivers so arrows read crisply from afar
     const boardYaw = Math.atan2(s.tangent.x, s.tangent.z) + outsideSide * 0.42;
 
@@ -5331,10 +5687,10 @@ export function buildTrackScene(
     }
 
     const postIdx = postTurnMats.length;
-    dummy.position.set(px, s.pos.y + 1.15, pz);
+    dummy.position.set(px, s.pos.y + 0.35, pz);
     dummy.updateMatrix();
     postTurnMats.push(dummy.matrix.clone());
-    chevMeta.push({ x: px, y: s.pos.y, z: pz, sampleIdx: i, turnDir, boardIdx, postIdx });
+    chevMeta.push({ x: px, y: chevBaseY, z: pz, sampleIdx: i, turnDir, boardIdx, postIdx });
   }
 
   let leftBoardInst: THREE.InstancedMesh | null = null;
@@ -5390,7 +5746,7 @@ export function buildTrackScene(
     emissive: 0x2a1f05,
     emissiveIntensity: isNight ? 1.15 : 0.35,
   });
-  const sectorPostGeo = new THREE.BoxGeometry(0.75, 8.0, 0.85);
+  const sectorPostGeo = new THREE.BoxGeometry(0.75, 10.4, 0.85);
   const sectorBeamGeo = new THREE.BoxGeometry(roadWidth + 4.8, 1.65, 0.85);
   const sectorIndices = [195, 395];
   for (const si of sectorIndices) {
@@ -5402,7 +5758,7 @@ export function buildTrackScene(
     sg.rotation.y = Math.atan2(s.tangent.x, s.tangent.z);
     for (const side of [-1, 1]) {
       const p = new THREE.Mesh(sectorPostGeo, signPostMat);
-      p.position.set(side * (halfRoad + 2.2), 4.0, 0);
+      p.position.set(side * (halfRoad + 2.2), 2.8, 0);
       sg.add(p);
       poleColliders.push({
         x: s.pos.x + s.right.x * side * (halfRoad + 2.2),
@@ -5429,9 +5785,9 @@ export function buildTrackScene(
   //     Fills empty sidewalks, piazzas, promenades & roadside verges on ALL tracks
   //     (Every bench & flower pot is a speed-based movable knock-down object!)
   // =========================================================================
-  // A. 4-Part Cast-Iron & Cedar Wood Park/Street Bench (2.1m wide, grounded bottom-center)
-  const benchLegGeo = new THREE.BoxGeometry(0.12, 0.74, 0.62);
-  benchLegGeo.translate(0, 0.37, 0);
+  // A. 4-Part Cast-Iron & Cedar Wood Park/Street Bench (2.1m wide, anchored legs extend 0.16m below datum for sloped verges!)
+  const benchLegGeo = new THREE.BoxGeometry(0.12, 0.90, 0.62);
+  benchLegGeo.translate(0, 0.29, 0);
   const benchSeatGeo = new THREE.BoxGeometry(2.05, 0.09, 0.56);
   benchSeatGeo.translate(0, 0.46, 0.04);
   const benchBackGeo = new THREE.BoxGeometry(2.05, 0.42, 0.08);
@@ -5645,9 +6001,14 @@ export function buildTrackScene(
       if (!isClearOfTrack(bx, bz, halfRoad + kerbWidth + 1.4)) continue;
       if (isInsidePond(bx, bz)) continue;
 
-      const { y: gy } = sampleTerrainHeight(bx, bz);
       const roadYaw = Math.atan2(s.tangent.x, s.tangent.z);
       const faceYaw = side === -1 ? roadYaw + Math.PI * 0.5 : roadYaw - Math.PI * 0.5;
+      const cosF = Math.cos(faceYaw);
+      const sinF = Math.sin(faceYaw);
+      const yCenter = sampleRoadsideGroundY(bx, bz, s.pos.y, vergeDist);
+      const yLeftLeg = sampleRoadsideGroundY(bx - cosF * 0.88, bz + sinF * 0.88, s.pos.y, vergeDist);
+      const yRightLeg = sampleRoadsideGroundY(bx + cosF * 0.88, bz - sinF * 0.88, s.pos.y, vergeDist);
+      const gy = Math.min(yCenter, yLeftLeg, yRightLeg) - 0.02;
       placedBenches.push({
         x: bx,
         y: gy,
@@ -5662,7 +6023,7 @@ export function buildTrackScene(
         const px = bx + s.tangent.x * endSign * 1.52;
         const pz = bz + s.tangent.z * endSign * 1.52;
         if (!isClearOfTrack(px, pz, halfRoad + kerbWidth + 1.2)) continue;
-        const { y: pgy } = sampleTerrainHeight(px, pz);
+        const pgy = sampleRoadsideGroundY(px, pz, s.pos.y, vergeDist) - 0.04;
         pushDecorPot(px, pgy, pz, pgy, i, 0.95 + ((i + (endSign > 0 ? 1 : 0)) % 3) * 0.1);
       }
 
@@ -5674,7 +6035,7 @@ export function buildTrackScene(
         const ox = s.pos.x + s.right.x * oppSide * oppDist;
         const oz = s.pos.z + s.right.z * oppSide * oppDist;
         if (isClearOfTrack(ox, oz, halfRoad + kerbWidth + 1.2) && !isInsidePond(ox, oz)) {
-          const { y: ogy } = sampleTerrainHeight(ox, oz);
+          const ogy = sampleRoadsideGroundY(ox, oz, s.pos.y, oppDist) - 0.04;
           pushDecorPot(ox, ogy, oz, ogy, i, 1.06);
         }
       }
@@ -5865,6 +6226,8 @@ export function buildTrackScene(
     hemiIntensity,
     minimapPoints,
     bounds,
+    getGroundY: sampleMeshGroundY,
+    roadMaterial: roadMat,
     dispose: () => {
       disposables.forEach((d) => d.dispose());
     },
